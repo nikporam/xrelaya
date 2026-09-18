@@ -185,9 +185,9 @@ twitter-telegram-bot/
 - ✅ Multiple Nitter instances for reliability
 - ✅ Bot auto-switches if one instance is down
 - ✅ Retweets/reposts are filtered out
-- ✅ Captions split when too long for photos
+- ✅ Single Telegram card per tweet: long captions are auto-truncated without splitting into separate messages
 - ✅ Translation retries + Google/MyMemory fallback when the AI provider fails
-- ✅ Saved tweets with empty translations are backfilled automatically
+- ✅ Saved tweets with empty translations are backfilled automatically for database & dashboard (no duplicate Telegram messages)
 - ✅ Deduplication prevents duplicate messages
 - ✅ Old data auto-cleaned (30 days)
 

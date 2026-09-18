@@ -178,7 +178,7 @@ def extract_author_username(entry):
 def extract_link_username(entry):
     for key in ("link", "id", "guid"):
         value = str(entry.get(key, "") or "")
-        match = re.search(r"https?://[^/]+/([^/?#]+)/status(?:es)?/\d+", value, flags=re.I)
+        match = re.search(r"(?:https?://[^/]+)?/([^/?#]+)/status(?:es)?/\d+", value, flags=re.I)
         if not match:
             continue
         username = clean_username(match.group(1))
@@ -188,27 +188,55 @@ def extract_link_username(entry):
 
 def is_retweet(entry, username=None):
     """Detect RSS entries that are retweets/reposts rather than tweets by `username`."""
-    raw_text = "\n".join(str(entry.get(k, "") or "") for k in ("title", "summary", "description"))
-    clean_text = clean_tweet_text(raw_text).lower()
-    raw_lower = raw_text.lower()
+    raw_title = str(entry.get("title", "") or "")
+    raw_desc = str(entry.get("description", "") or "")
+    raw_summary = str(entry.get("summary", "") or "")
+    combined_raw = f"{raw_title}\n{raw_desc}\n{raw_summary}"
+    combined_lower = combined_raw.lower()
 
-    retweet_patterns = [
-        r"^\s*rt\s+@",
-        r"^\s*retweet(?:ed)?\b",
-        r"^\s*@?[A-Za-z0-9_]{1,15}\s+retweeted\b",
-        r"\bretweeted by\b",
-        r"\breposted by\b",
+    # 1. HTML markers from Nitter / RSS bridges
+    if "retweet-header" in combined_lower or "retweet_header" in combined_lower:
+        return True
+    if re.search(r'class=["\'][^"\']*\bretweet\b[^"\']*["\']', combined_raw, re.I):
+        return True
+
+    # 2. RSS tags / categories
+    for tag_field in (entry.get("tags", []) or [], entry.get("categories", []) or []):
+        for tag in tag_field:
+            term = (tag.get("term") or tag.get("label")) if isinstance(tag, dict) else str(tag)
+            if term and str(term).strip().lower() in {"rt", "retweet", "repost"}:
+                return True
+
+    # 3. Text patterns in title and body
+    clean_title = clean_tweet_text(raw_title).lower()
+    clean_all = clean_tweet_text(combined_raw).lower()
+
+    title_patterns = [
+        r"^\s*rt\s+(?:by\s+)?@?",
+        r"^\s*rt\s*:\s*@?",
+        r"^\s*\[rt\]",
+        r"^\s*retweet(?:ed)?(?:\s+by)?\b",
+        r"^\s*repost(?:ed)?(?:\s+by)?\b",
+        r"^\s*@?[a-z0-9_]{1,15}\s+(?:retweeted|reposted)\b",
+        r"\bretweeted\s+by\b",
+        r"\breposted\s+by\b",
+        r"\brt\s+by\s+@",
+        r"بازتوییت",
+        r"ریتوییت",
     ]
-    if any(re.search(pattern, clean_text, flags=re.I) for pattern in retweet_patterns):
-        return True
-    if "retweet-header" in raw_lower or ("retweet" in raw_lower and "retweeted by" in raw_lower):
+    if any(re.search(p, clean_title, re.I) for p in title_patterns):
         return True
 
-    for tag in entry.get("tags", []) or []:
-        term = tag.get("term") if isinstance(tag, dict) else str(tag)
-        if term and term.lower() in {"rt", "retweet", "repost"}:
-            return True
+    general_patterns = [
+        r"\bretweeted\s+by\b",
+        r"\breposted\s+by\b",
+        r"\brt\s+by\s+@",
+        r"^\s*rt\s+@",
+    ]
+    if any(re.search(p, clean_all, re.I) for p in general_patterns):
+        return True
 
+    # 4. Author and URL mismatch if expected username is provided
     expected = clean_username(username) if username else ""
     if expected:
         link_username = extract_link_username(entry)
@@ -236,7 +264,7 @@ def extract_image_url(entry):
 def _trim_translation(result):
     result = clean_tweet_text(result)
     result = re.sub(r"^(ترجمه(?:\s*فارسی)?|translation)\s*[:：-]\s*", "", result, flags=re.I)
-    return result.strip(' "“”')
+    return result.strip(' "“”\n\r\t')
 
 def _message_content_to_text(content):
     if isinstance(content, str):
@@ -299,20 +327,32 @@ async def _translate_with_requesty(text):
 
 async def _translate_with_google_endpoint(text):
     # Fast unofficial endpoint used only as a fallback when the AI provider is absent/down.
-    params = {"client": "gtx", "sl": "auto", "tl": "fa", "dt": "t", "q": text}
+    params = {"client": "gtx", "sl": "auto", "tl": "fa", "dt": "t"}
     async with _translation_client() as client:
-        resp = await client.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params=params,
-            timeout=TRANSLATION_TIMEOUT,
-        )
+        try:
+            resp = await client.post(
+                "https://translate.googleapis.com/translate_a/single",
+                params=params,
+                data={"q": text},
+                timeout=TRANSLATION_TIMEOUT,
+            )
+        except Exception:
+            resp = await client.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={**params, "q": text},
+                timeout=TRANSLATION_TIMEOUT,
+            )
     if resp.status_code != 200:
         logger.warning("Google endpoint translate status %s: %s", resp.status_code, resp.text[:200])
         return ""
     data = resp.json()
-    if not data or not data[0]:
+    if not data or not isinstance(data, list) or not data[0]:
         return ""
-    return _trim_translation("".join(part[0] for part in data[0] if part and part[0]))
+    parts = []
+    for part in data[0]:
+        if part and isinstance(part, list) and len(part) > 0 and part[0]:
+            parts.append(str(part[0]))
+    return _trim_translation("".join(parts))
 
 def _chunk_text(text, max_chars=450):
     parts = re.split(r"(?<=[.!?؟؛])\s+|\n+", text)
@@ -338,9 +378,10 @@ def _chunk_text(text, max_chars=450):
 async def _translate_with_mymemory(text):
     # Non-Google fallback for hosts where Google is rate-limited/blocked.
     translated_parts = []
+    source_lang = MYMEMORY_SOURCE_LANG if MYMEMORY_SOURCE_LANG else "en"
     async with _translation_client() as client:
         for chunk in _chunk_text(text):
-            params = {"q": chunk, "langpair": f"{MYMEMORY_SOURCE_LANG}|fa"}
+            params = {"q": chunk, "langpair": f"{source_lang}|fa"}
             if MYMEMORY_EMAIL:
                 params["de"] = MYMEMORY_EMAIL
             resp = await client.get(
@@ -356,7 +397,7 @@ async def _translate_with_mymemory(text):
                 logger.warning("MyMemory translate response %s: %s", data.get("responseStatus"), data.get("responseDetails"))
                 return ""
             part = data.get("responseData", {}).get("translatedText", "")
-            if not part:
+            if not part or "MYMEMORY WARNING" in str(part).upper():
                 return ""
             translated_parts.append(part)
             await asyncio.sleep(0.2)
@@ -364,8 +405,14 @@ async def _translate_with_mymemory(text):
 
 def _translate_with_deep_translator_sync(text):
     from deep_translator import GoogleTranslator
-    result = GoogleTranslator(source="auto", target="fa").translate(text)
-    return _trim_translation(result)
+    chunks = _chunk_text(text, max_chars=4000)
+    results = []
+    translator = GoogleTranslator(source="auto", target="fa")
+    for chunk in chunks:
+        res = translator.translate(chunk)
+        if res:
+            results.append(res)
+    return _trim_translation("\n".join(results))
 
 async def _translate_with_deep_translator(text):
     try:
@@ -374,7 +421,30 @@ async def _translate_with_deep_translator(text):
             timeout=TRANSLATION_TIMEOUT,
         )
     except Exception as e:
-        logger.warning("deep-translator failed: %s", e)
+        logger.warning("deep-translator Google failed: %s", e)
+        return ""
+
+def _translate_with_deep_mymemory_sync(text):
+    from deep_translator import MyMemoryTranslator
+    chunks = _chunk_text(text, max_chars=450)
+    results = []
+    translator = MyMemoryTranslator(source="auto", target="fa-IR")
+    for chunk in chunks:
+        res = translator.translate(chunk)
+        if res and "MYMEMORY WARNING" not in str(res).upper():
+            results.append(res)
+        else:
+            return ""
+    return _trim_translation("\n".join(results))
+
+async def _translate_with_deep_mymemory(text):
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_translate_with_deep_mymemory_sync, text),
+            timeout=TRANSLATION_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning("deep-translator MyMemory failed: %s", e)
         return ""
 
 async def translate_text(text):
@@ -385,38 +455,51 @@ async def translate_text(text):
     # Keep enough context for long posts/quotes but stay below provider limits.
     source_text = text[:3000]
     cache_key = hashlib.md5(source_text.encode()).hexdigest()
+
+    # Never return or retain empty cached translation
     if cache_key in translations_cache:
-        return translations_cache[cache_key]
+        cached_val = translations_cache[cache_key]
+        if cached_val and cached_val.strip():
+            return cached_val
+        translations_cache.pop(cache_key, None)
 
     translators = [_translate_with_requesty] if REQUESTY_API_KEY else []
-    translators.extend([_translate_with_google_endpoint, _translate_with_mymemory, _translate_with_deep_translator])
+    translators.extend([
+        _translate_with_google_endpoint,
+        _translate_with_deep_translator,
+        _translate_with_mymemory,
+        _translate_with_deep_mymemory,
+    ])
+
+    retries_per_translator = max(1, TRANSLATION_RETRIES)
 
     async with translation_sem:
         for translator in translators:
-            attempts = max(1, TRANSLATION_RETRIES) if translator in (_translate_with_requesty, _translate_with_google_endpoint) else 1
-            for attempt in range(1, attempts + 1):
+            for attempt in range(1, retries_per_translator + 1):
                 try:
                     result = await translator(source_text)
                 except Exception as e:
                     logger.warning("%s failed on attempt %s: %s", translator.__name__, attempt, e)
                     result = ""
-                if result:
+                if result and result.strip():
+                    cleaned = result.strip()
                     if len(translations_cache) > 500:
                         translations_cache.clear()
-                    translations_cache[cache_key] = result
-                    return result
-                if attempt < attempts:
-                    await asyncio.sleep(0.6 * attempt)
+                    translations_cache[cache_key] = cleaned
+                    return cleaned
+                if attempt < retries_per_translator:
+                    await asyncio.sleep(0.5 * attempt)
 
-    # Important: do not cache failures. A temporary provider outage should not make this
-    # tweet permanently untranslated for the rest of the process lifetime.
+    # Important: do not cache failures / empty results.
+    # A temporary provider outage should not make this tweet permanently untranslated.
     logger.warning("Translation unavailable after all fallbacks for text: %s", source_text[:120])
     return ""
 
 
 async def fetch_feed(username):
+    target_username = clean_username(username)
     for src in RSS_SOURCES:
-        url = src.format(username=username)
+        url = src.format(username=target_username)
         try:
             resp = await http.get(url, timeout=15, follow_redirects=True)
             if resp.status_code != 200 or "uni-sonia" in str(resp.url):
@@ -427,12 +510,12 @@ async def fetch_feed(username):
             for entry in feed.entries:
                 if not extract_id(entry):
                     continue
-                if is_retweet(entry, username):
+                if is_retweet(entry, target_username):
                     skipped_retweets += 1
                     continue
                 valid.append(entry)
             if skipped_retweets:
-                logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, username)
+                logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, target_username)
             if valid:
                 return valid
         except Exception:
@@ -628,7 +711,7 @@ async def cmd_test(update, context):
     if entries:
         content = await build_content(username, entries[0])
         if content:
-            await deliver(content, [str(update.effective_chat.id)], context.application.bot)
+            await deliver(content, [str(update.effective_chat.id)], context.application.bot, force=True)
     else:
         await update.message.reply_text("❌ خطا در دریافت فید.")
 
@@ -685,13 +768,34 @@ async def handle_inline_query(update, context):
 
 # ── Tweet Engine ──────────────────────────────────────────────────────────
 
+TELEGRAM_CAPTION_LIMIT = 1024
+TELEGRAM_TEXT_LIMIT = 4096
+
+def utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+def escape_and_truncate(text: str, budget: int) -> str:
+    """Escapes text for HTML and truncates with ellipsis so utf16_len <= budget."""
+    if budget <= 0:
+        return ""
+    escaped = html.escape(text.strip())
+    if utf16_len(escaped) <= budget:
+        return escaped
+    if budget <= 1:
+        return "…"
+    cut = text.strip()
+    while cut and (utf16_len(html.escape(cut) + "…") > budget):
+        overflow = utf16_len(html.escape(cut) + "…") - budget
+        step = max(1, overflow // 4)
+        cut = cut[:-step].strip()
+    return (html.escape(cut) + "…") if cut else "…"
+
 async def build_content(username, entry):
     tid = extract_id(entry)
     if not tid or is_retweet(entry, username):
         return None
     title = extract_tweet_text(entry)
     translation = await translate_text(title)
-    translation_pending = bool(TRANSLATE_FA and title and _has_text_to_translate(title) and not translation)
     img_url = extract_image_url(entry)
     link = f"https://x.com/i/status/{tid}"
     return {
@@ -699,51 +803,125 @@ async def build_content(username, entry):
         "username": username,
         "title": title,
         "translation": translation,
-        "translation_pending": translation_pending,
         "img_url": img_url,
         "link": link,
     }
 
 
-def build_message(c):
-    header = f"🔔 <b>NEW UPDATE | @{html.escape(c['username']).upper()}</b>"
-    body = f"\n📝 <b>Original:</b>\n<blockquote expandable>{html.escape(c['title'][:1900])}</blockquote>"
-    msg = f"{header}\n{body}"
-    if c["translation"]:
-        msg += f"\n{'━'*10}\n🦁 <b>ترجمه فارسی:</b>\n<blockquote expandable><i>{html.escape(c['translation'][:1900])}</i></blockquote>"
-    elif c.get("translation_pending"):
-        msg += f"\n{'━'*10}\n🦁 <b>ترجمه فارسی:</b>\n<i>ترجمه فعلاً ناموفق بود؛ ربات دوباره تلاش می‌کند و بعداً ارسال می‌کند.</i>"
-    return msg
+def build_message(c, max_len=TELEGRAM_TEXT_LIMIT):
+    username = str(c.get("username", "") or "")
+    title = str(c.get("title", "") or "").strip()
+    translation = str(c.get("translation", "") or "").strip()
+
+    header = f"🔔 <b>NEW UPDATE | @{html.escape(username).upper()}</b>"
+    has_title = bool(title)
+    has_trans = bool(translation)
+
+    if not has_title and not has_trans:
+        return header
+
+    orig_prefix = "\n📝 <b>Original:</b>\n<blockquote expandable>"
+    orig_suffix = "</blockquote>"
+    trans_prefix = f"\n{'━'*10}\n🦁 <b>ترجمه فارسی:</b>\n<blockquote expandable><i>"
+    trans_suffix = "</i></blockquote>"
+
+    if has_title and has_trans:
+        fixed_len = (
+            utf16_len(header)
+            + utf16_len(orig_prefix)
+            + utf16_len(orig_suffix)
+            + utf16_len(trans_prefix)
+            + utf16_len(trans_suffix)
+        )
+        budget = max(0, max_len - fixed_len)
+        orig_full = html.escape(title)
+        trans_full = html.escape(translation)
+
+        if utf16_len(orig_full) + utf16_len(trans_full) <= budget:
+            body_orig = orig_full
+            body_trans = trans_full
+        else:
+            half = budget // 2
+            orig_len = utf16_len(orig_full)
+            trans_len = utf16_len(trans_full)
+            if orig_len < half:
+                orig_budget = orig_len
+                trans_budget = budget - orig_budget
+            elif trans_len < half:
+                trans_budget = trans_len
+                orig_budget = budget - trans_budget
+            else:
+                orig_budget = half
+                trans_budget = budget - half
+            body_orig = escape_and_truncate(title, orig_budget)
+            body_trans = escape_and_truncate(translation, trans_budget)
+        return f"{header}{orig_prefix}{body_orig}{orig_suffix}{trans_prefix}{body_trans}{trans_suffix}"
+
+    elif has_title:
+        fixed_len = utf16_len(header) + utf16_len(orig_prefix) + utf16_len(orig_suffix)
+        budget = max(0, max_len - fixed_len)
+        body_orig = escape_and_truncate(title, budget)
+        return f"{header}{orig_prefix}{body_orig}{orig_suffix}"
+
+    else:
+        fixed_len = utf16_len(header) + utf16_len(trans_prefix) + utf16_len(trans_suffix)
+        budget = max(0, max_len - fixed_len)
+        body_trans = escape_and_truncate(translation, budget)
+        return f"{header}{trans_prefix}{body_trans}{trans_suffix}"
 
 
 async def deliver(content, chat_ids, bot, force=False):
     if not content:
         return
-    msg = build_message(content)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View on X", url=content["link"])]])
     saved = False
+
+    has_photo = bool(content.get("img_url"))
+    caption = build_message(content, max_len=TELEGRAM_CAPTION_LIMIT)
+    full_text = build_message(content, max_len=TELEGRAM_TEXT_LIMIT)
+
     for cid in chat_ids:
         if not force and db.is_duplicate(cid, content["tid"]):
             continue
-        try:
-            if content["img_url"] and len(msg) <= 1024:
-                await bot.send_photo(chat_id=cid, photo=content["img_url"], caption=msg, reply_markup=kb, parse_mode=ParseMode.HTML)
-            elif content["img_url"]:
-                short = f"🔔 <b>@{html.escape(content['username']).upper()}</b>\n🔗 {content['link']}"
-                await bot.send_photo(chat_id=cid, photo=content["img_url"], caption=short, reply_markup=kb, parse_mode=ParseMode.HTML)
-                await bot.send_message(chat_id=cid, text=msg, parse_mode=ParseMode.HTML)
-            else:
-                await bot.send_message(chat_id=cid, text=msg, reply_markup=kb, parse_mode=ParseMode.HTML)
+        sent_ok = False
+        if has_photo:
+            try:
+                await bot.send_photo(
+                    chat_id=cid,
+                    photo=content["img_url"],
+                    caption=caption,
+                    reply_markup=kb,
+                    parse_mode=ParseMode.HTML,
+                )
+                sent_ok = True
+            except Exception as e:
+                logger.warning("Photo send failed to %s: %s, falling back to text message", cid, e)
+                try:
+                    await bot.send_message(
+                        chat_id=cid,
+                        text=full_text,
+                        reply_markup=kb,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    sent_ok = True
+                except Exception as e2:
+                    logger.error("Fallback text send failed to %s: %s", cid, e2)
+        else:
+            try:
+                await bot.send_message(
+                    chat_id=cid,
+                    text=full_text,
+                    reply_markup=kb,
+                    parse_mode=ParseMode.HTML,
+                )
+                sent_ok = True
+            except Exception as e:
+                logger.error("Send failed to %s: %s", cid, e)
+
+        if sent_ok:
             db.mark_sent(cid, content["tid"])
             saved = True
-        except Exception as e:
-            logger.error(f"Send failed to {cid}: {e}")
-            try:
-                await bot.send_message(chat_id=cid, text=msg, reply_markup=kb, parse_mode=ParseMode.HTML)
-                db.mark_sent(cid, content["tid"])
-                saved = True
-            except Exception as e2:
-                logger.error(f"Fallback send failed: {e2}")
+
     if saved:
         c = content
         db.save_tweet_content(c["username"], c["title"], c["translation"], c["img_url"], c["link"])
@@ -804,40 +982,17 @@ async def check_updates(context):
             logger.error(f"Error processing @{u}: {r}")
 
 
-async def notify_backfilled_translation(row, translation, bot):
-    tweet_id = extract_tweet_id_from_link(row.get("tweet_link"))
-    if not tweet_id:
-        return
-    chat_ids = db.get_sent_chats_for_tweet(tweet_id)
-    if not chat_ids:
-        return
-    username = html.escape(str(row.get("username") or "").upper())
-    msg = (
-        f"🦁 <b>ترجمه فارسی | @{username}</b>\n"
-        f"<blockquote expandable><i>{html.escape(translation[:1900])}</i></blockquote>"
-    )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View on X", url=row["tweet_link"])]]) if row.get("tweet_link") else None
-    for cid in chat_ids:
-        try:
-            await bot.send_message(chat_id=cid, text=msg, reply_markup=kb, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.error("Backfill translation notify failed to %s for %s: %s", cid, tweet_id, e)
-
-
 async def run_translation_backfill(context):
     if not db.enabled or not TRANSLATE_FA:
         return
     rows = db.get_tweets_missing_translation(TRANSLATION_BACKFILL_LIMIT)
     if not rows:
         return
-    logger.info("Backfilling translations for %s saved tweets", len(rows))
-    bot = context.application.bot if context and context.application else None
+    logger.info("Backfilling translations for %s saved tweets (DB/dashboard only)", len(rows))
     for row in rows:
         translation = await translate_text(row["title"])
-        if translation:
-            db.update_tweet_translation(row["id"], translation)
-            if bot:
-                await notify_backfilled_translation(row, translation, bot)
+        if translation and translation.strip():
+            db.update_tweet_translation(row["id"], translation.strip())
         await asyncio.sleep(0.4)
 
 
