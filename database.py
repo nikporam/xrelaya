@@ -115,6 +115,34 @@ class Database:
     def save_tweet_content(self, username, title, translation, img_url, tweet_link):
         self._run("INSERT INTO tweets_content (username, title, translation, img_url, tweet_link) VALUES (%s,%s,%s,%s,%s)", (username, title, translation, img_url, tweet_link), fetch=None)
 
+    def count_missing_translations(self):
+        row = self._run(
+            "SELECT COUNT(*) FROM tweets_content WHERE COALESCE(NULLIF(TRIM(translation), ''), '') = '' AND COALESCE(NULLIF(TRIM(title), ''), '') <> ''",
+            fetch="one",
+            default=[0],
+        )
+        return row[0] if row else 0
+
+    def get_tweets_missing_translation(self, limit=15):
+        rows = self._run(
+            "SELECT id, username, title, tweet_link FROM tweets_content WHERE COALESCE(NULLIF(TRIM(translation), ''), '') = '' AND COALESCE(NULLIF(TRIM(title), ''), '') <> '' ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+            default=[],
+        )
+        columns = ["id", "username", "title", "tweet_link"]
+        return [dict(zip(columns, r)) for r in rows] if rows else []
+
+    def get_sent_chats_for_tweet(self, tweet_id):
+        rows = self._run("SELECT chat_id FROM sent_ids WHERE tweet_id = %s", (str(tweet_id),), default=[])
+        return [r[0] for r in rows] if rows else []
+
+    def update_tweet_translation(self, tweet_id, translation):
+        self._run(
+            "UPDATE tweets_content SET translation = %s WHERE id = %s",
+            (translation, tweet_id),
+            fetch=None,
+        )
+
     def get_latest_tweets(self, limit=30):
         rows = self._run("SELECT username, title, translation, img_url, tweet_link, created_at FROM tweets_content ORDER BY created_at DESC LIMIT %s", (limit,), default=[])
         if not rows:
