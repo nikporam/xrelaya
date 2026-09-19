@@ -26,7 +26,7 @@
 |---------|-------------|
 | 🔄 **Auto Forward** | Tweets delivered to Telegram automatically |
 | 🦁 **AI Translation** | Gemini / Google Translate to Persian |
-| 🚫 **Retweet Filter** | Skips retweets/reposts from RSS feeds |
+| 🚫 **Retweet Filter** | Skips retweets/reposts, without misreading display names as handles |
 | 🖼️ **Media Support** | Photos included with tweets |
 | 📊 **Live Dashboard** | Web UI to view all tweets |
 | 🔍 **Inline Search** | Search tweets from any chat |
@@ -176,6 +176,7 @@ twitter-telegram-bot/
 | `MAX_TWEETS_PER_CHECK` | `10` | New tweets processed per account each check |
 | `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback translator |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
+| `LOG_LEVEL` | `INFO` | Set to `DEBUG` to log why each feed entry was kept or skipped |
 
 ---
 
@@ -184,7 +185,8 @@ twitter-telegram-bot/
 - ❌ Private accounts won't work (RSS limitation)
 - ✅ Multiple Nitter instances for reliability
 - ✅ Bot auto-switches if one instance is down
-- ✅ Retweets/reposts are filtered out
+- ✅ Retweets/reposts are filtered out; a display name (e.g. `RippleX`) is never mistaken for a handle, so accounts stay visible
+- ✅ With `LOG_LEVEL=DEBUG` every skipped entry is logged with its reason (e.g. `Skip @nasa 123: status link is @nasa`)
 - ✅ Single Telegram card per tweet: long captions are auto-truncated without splitting into separate messages
 - ✅ Translation retries + Google/MyMemory fallback when the AI provider fails
 - ✅ Saved tweets with empty translations are backfilled automatically for database & dashboard (no duplicate Telegram messages)

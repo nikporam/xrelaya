@@ -10,6 +10,8 @@ from twitter_telegram_bot import (
     build_message,
     deliver,
     escape_and_truncate,
+    extract_author_username,
+    fetch_feed,
     is_retweet,
     run_translation_backfill,
     translate_text,
@@ -177,6 +179,136 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
                 "elonmusk",
             )
         )
+
+    def test_display_name_is_not_mistaken_for_a_handle(self):
+        """A display name such as "RippleX" must never make a real tweet look like a retweet."""
+        # <dc:creator> holds the fullname on many mirrors: no spaces, looks exactly like a handle.
+        self.assertEqual(extract_author_username({"author": "RippleX"}), ("ripplex", False))
+        entry = {
+            "title": "X Money support is live",
+            "link": "https://nitter.cz/RippleSupport/status/1234",
+            "author": "RippleX",
+        }
+        self.assertFalse(is_retweet(entry, "ripplesupport"))
+        # Without a usable status link, a guessed handle is still not evidence of a repost.
+        self.assertFalse(is_retweet({"title": "Hello", "author": "RippleX"}, "ripplesupport"))
+        # Full names with spaces are not even reported as hints.
+        self.assertEqual(extract_author_username({"author": "Ripple Support"}), ("", False))
+
+    def test_author_email_is_not_the_mirror_domain(self):
+        """`<author>nasa@nitter.net (NASA)</author>` means @nasa, not @nitter."""
+        entry = {"title": "Perseverance update", "author": "nasa@nitter.net (NASA)"}
+        self.assertEqual(extract_author_username(entry), ("nasa", True))
+        self.assertFalse(is_retweet(entry, "nasa"))
+        self.assertTrue(is_retweet(entry, "elonmusk"))
+
+    def test_own_status_link_wins_over_conflicting_author_field(self):
+        """If the entry links to the subscribed account's own status, that tweet is theirs."""
+        entry = {
+            "title": "Interesting thread",
+            "link": "https://nitter.cz/elonmusk/status/7",
+            "author": "Elon (@nasa)",
+        }
+        self.assertFalse(is_retweet(entry, "elonmusk"))
+
+    def test_explicit_foreign_handle_still_filters(self):
+        """Nitter credits a repost to the original author with an explicit @handle."""
+        entry = {"title": "Great launch", "link": "https://nitter.cz/i/status/8", "author": "@nasa"}
+        self.assertTrue(is_retweet(entry, "elonmusk"))
+
+    def test_quoted_block_cannot_leak_retweet_markers(self):
+        """Banners inside an embedded quote/card block belong to the quoted tweet, not to us."""
+        entry = {
+            "title": "This take aged badly",
+            "link": "https://nitter.cz/elonmusk/status/9",
+            "description": (
+                "This take aged badly<hr/>\n<blockquote>\n"
+                '<div class="retweet-header">nasa retweeted</div>\n<p>old</p>\n</blockquote>'
+            ),
+        }
+        self.assertFalse(is_retweet(entry, "elonmusk"))
+
+    def test_tweet_talking_about_retweets_is_kept(self):
+        """"I was retweeted by @nasa" is the tweet's own text, not a feed banner."""
+        entry = {
+            "title": "I was retweeted by @nasa today",
+            "description": "I was retweeted by @nasa today. RT by @nasa got 3k likes.",
+            "link": "https://nitter.cz/elonmusk/status/10",
+        }
+        self.assertFalse(is_retweet(entry, "elonmusk"))
+        # The same wording on the banner line (before the text) is still a repost.
+        banner = {
+            "title": "RT by @nasa: Great launch",
+            "description": "RT by @nasa: Great launch",
+            "link": "https://nitter.cz/nasa/status/11",
+        }
+        self.assertTrue(is_retweet(banner, "elonmusk"))
+
+    def test_parsed_feed_entries(self):
+        """End-to-end classification of the two Nitter RSS shapes we have to support."""
+        import feedparser
+
+        def parse(creator, link, title="Hello world"):
+            xml = (
+                '<?xml version="1.0"?><rss version="2.0" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>ch</title>'
+                f"<item><title>{title}</title><guid isPermaLink=\"false\">123</guid>"
+                f"<link>{link}</link><dc:creator>{creator}</dc:creator>"
+                "<description><![CDATA[<p>Hello world</p>]]></description></item></channel></rss>"
+            )
+            return feedparser.parse(xml).entries[0]
+
+        # A repost: Nitter links and credits it to the original author.
+        repost = parse("@nasa", "https://nitter.cz/nasa/status/123", title="RT by @ripplesupport: Hello world")
+        self.assertTrue(is_retweet(repost, "ripplesupport"))
+        # An original tweet whose creator field is only the display name.
+        own = parse("RippleX", "https://nitter.cz/ripplesupport/status/124")
+        self.assertFalse(is_retweet(own, "ripplesupport"))
+        # An explicit @creator that matches the subscription is never a repost.
+        self.assertFalse(is_retweet(parse("@ripplesupport", "https://nitter.cz/ripplesupport/status/125"), "ripplesupport"))
+
+    def _rss(self, items):
+        return (
+            '<?xml version="1.0"?><rss version="2.0" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>ch</title>'
+            + items
+            + "</channel></rss>"
+        )
+
+    async def test_fetch_feed_drops_reposts_and_keeps_originals(self):
+        """A feed with a repost and an own tweet returns only the own tweet."""
+        items = (
+            "<item><title>RT by @ripplesupport: NASA news</title>"
+            "<link>https://nitter.cz/nasa/status/1</link><dc:creator>@nasa</dc:creator>"
+            "<description>NASA news</description></item>"
+            "<item><title>My own news</title>"
+            "<link>https://nitter.cz/ripplesupport/status/2</link><dc:creator>RippleX</dc:creator>"
+            "<description>My own news</description></item>"
+        )
+        resp = MagicMock(status_code=200, text=self._rss(items))
+        resp.url = "https://nitter.cz/ripplesupport/rss"
+        client = MagicMock()
+        client.get = AsyncMock(return_value=resp)
+        with patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("ripplesupport")
+        self.assertEqual([str(e.get("title")) for e in entries], ["My own news"])
+        self.assertEqual(client.get.await_count, 1)
+
+    async def test_fetch_feed_all_reposts_does_not_hammer_mirrors(self):
+        """An all-reposts feed is a complete answer, not a reason to try every mirror."""
+        items = (
+            "<item><title>RT by @ripplesupport: Someone else</title>"
+            "<link>https://nitter.cz/nasa/status/3</link><dc:creator>@nasa</dc:creator>"
+            "<description>Someone else</description></item>"
+        )
+        resp = MagicMock(status_code=200, text=self._rss(items))
+        resp.url = "https://nitter.cz/ripplesupport/rss"
+        client = MagicMock()
+        client.get = AsyncMock(return_value=resp)
+        with patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("ripplesupport")
+        self.assertEqual(entries, [])
+        self.assertEqual(client.get.await_count, 1)
 
     async def test_empty_translation_never_cached(self):
         """Empty translation results must never be added to cache."""
