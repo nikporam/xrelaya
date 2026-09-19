@@ -57,7 +57,12 @@ MAX_TWEETS_PER_CHECK = int(os.getenv("MAX_TWEETS_PER_CHECK", "10"))
 MYMEMORY_SOURCE_LANG = os.getenv("MYMEMORY_SOURCE_LANG", "en").strip() or "en"
 MYMEMORY_EMAIL = os.getenv("MYMEMORY_EMAIL", "").strip()
 
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
+# Set LOG_LEVEL=DEBUG to see why each RSS entry was kept or skipped by the retweet filter.
+LOG_LEVEL = (os.getenv("LOG_LEVEL", "INFO") or "INFO").strip().upper()
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+)
 logger = logging.getLogger(__name__)
 
 db = Database()
@@ -145,21 +150,56 @@ def extract_tweet_text(entry):
             return text
     return ""
 
+def _handle_or_empty(candidate):
+    """Normalise a candidate handle, returning '' for anything that is not a valid one."""
+    username = clean_username(candidate)
+    if not username or username in {"i", "status", "statuses"}:
+        return ""
+    return username if is_valid_twitter(username) else ""
+
 def _username_from_text(value):
+    """Read a handle out of a feed field such as `<author>` or `<dc:creator>`.
+
+    Returns `(username, explicit)`. `explicit` is True only when the feed actually stated a
+    handle: an `@name`, an RSS `email (name)` author (the local part is the handle, the
+    domain is just the instance), or a profile/status URL.
+
+    A lone token without `@` is never explicit: Nitter mirrors and RSS bridges routinely put
+    the *display name* in these fields, and names like "RippleX" or "NASA" are
+    indistinguishable from a handle. Treating such a guess as a handle made every tweet of
+    those accounts look like a retweet of somebody else and get silently dropped.
+    """
     value = html.unescape(str(value or "")).strip()
     if not value:
-        return None
-    match = re.search(r"@([A-Za-z0-9_]{1,15})", value)
-    if match:
-        return clean_username(match.group(1))
-    # Feedparser sometimes gives only the handle or profile URL as the author, without @.
-    # Do not guess from display names like "Elon Musk"; that would look like @elon.
+        return "", False
+    # <author>nasa@nitter.net (NASA)</author>: the local part is the handle, the domain is
+    # only the instance — so read addresses before looking for @mentions, otherwise the
+    # mirror's hostname ("nitter", "xcancel", …) turns into a fake author.
+    email_match = re.search(r"(?<![A-Za-z0-9_])([A-Za-z0-9_]{1,15})@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
+    if email_match:
+        return _handle_or_empty(email_match.group(1)), True
+    mention_match = re.search(r"(?<![\w.@])@([A-Za-z0-9_]{1,15})", value)
+    if mention_match:
+        return _handle_or_empty(mention_match.group(1)), True
+    # href-style references: https://nitter.net/nasa or .../nasa/status/123456
+    for pattern in (
+        r"(?:https?://[^/]+)?/([A-Za-z0-9_]{1,15})/status(?:es)?/\d+",
+        r"(?:https?://[^/]+)?/([A-Za-z0-9_]{1,15})/?$",
+    ):
+        ref = re.search(pattern, value, flags=re.I)
+        if not ref:
+            continue
+        username = _handle_or_empty(ref.group(1))
+        if username:
+            return username, True
+    # Display names with spaces ("Elon Musk") carry no handle at all; a single word is kept
+    # only as a weak hint, which can confirm the expected account but never accuse another.
     if re.search(r"\s", value):
-        return None
-    candidate = clean_username(value)
-    return candidate if is_valid_twitter(candidate) else None
+        return "", False
+    return _handle_or_empty(value), False
 
-def extract_author_username(entry):
+def _author_fields(entry):
+    """All author-ish values a feed parser may hand us, in order of trustworthiness."""
     candidates = [entry.get("author"), entry.get("dc_creator"), entry.get("creator")]
     author_detail = entry.get("author_detail") or {}
     if isinstance(author_detail, dict):
@@ -169,11 +209,23 @@ def extract_author_username(entry):
             candidates.extend([author.get("name"), author.get("href"), author.get("email")])
         else:
             candidates.append(author)
-    for value in candidates:
-        username = _username_from_text(value)
-        if username:
-            return username
-    return None
+    return candidates
+
+def extract_author_username(entry):
+    """Author handle of an entry as `(username, explicit)`.
+
+    An explicit `@handle`/URL always wins over a bare display-name guess.
+    """
+    weak = ("", False)
+    for value in _author_fields(entry):
+        username, explicit = _username_from_text(value)
+        if not username:
+            continue
+        if explicit:
+            return username, True
+        if not weak[0]:
+            weak = (username, False)
+    return weak
 
 def extract_link_username(entry):
     for key in ("link", "id", "guid"):
@@ -181,72 +233,84 @@ def extract_link_username(entry):
         match = re.search(r"(?:https?://[^/]+)?/([^/?#]+)/status(?:es)?/\d+", value, flags=re.I)
         if not match:
             continue
-        username = clean_username(match.group(1))
-        if username and username not in {"i", "status", "statuses"} and is_valid_twitter(username):
+        username = _handle_or_empty(match.group(1))
+        if username:
             return username
     return None
 
-def is_retweet(entry, username=None):
-    """Detect RSS entries that are retweets/reposts rather than tweets by `username`."""
-    raw_title = str(entry.get("title", "") or "")
-    raw_desc = str(entry.get("description", "") or "")
-    raw_summary = str(entry.get("summary", "") or "")
-    combined_raw = f"{raw_title}\n{raw_desc}\n{raw_summary}"
-    combined_lower = combined_raw.lower()
+# Quoted tweets, link cards, polls and articles are appended to the item body after an <hr>
+# (Nitter additionally wraps quotes in a <blockquote>); a retweet banner inside one of those
+# blocks belongs to the quoted tweet, not to the entry being filtered.
+_EMBEDDED_BLOCK_RE = re.compile(r'<(?:blockquote|hr)\b|class=["\'][^"\']*\bquote\b', re.I)
+
+def _own_item_text(entry):
+    """Title + body of an entry, cut before the first embedded (someone else's) block."""
+    raw = "\n".join(str(entry.get(key, "") or "") for key in ("title", "description", "summary"))
+    match = _EMBEDDED_BLOCK_RE.search(raw)
+    return raw if match is None else raw[: match.start()]
+
+def retweet_reason(entry, username=None):
+    """Reason an RSS entry looks like a retweet instead of a tweet by `username`, else None.
+
+    Returning the reason, not just a bool, keeps the filter debuggable: feed mirrors disagree
+    constantly, and "why was this tweet dropped" is the only question that matters once an
+    account stops showing up in Telegram.
+    """
+    own_raw = _own_item_text(entry)
+    own_lower = own_raw.lower()
 
     # 1. HTML markers from Nitter / RSS bridges
-    if "retweet-header" in combined_lower or "retweet_header" in combined_lower:
-        return True
-    if re.search(r'class=["\'][^"\']*\bretweet\b[^"\']*["\']', combined_raw, re.I):
-        return True
+    if "retweet-header" in own_lower or "retweet_header" in own_lower:
+        return "retweet-header markup"
+    if re.search(r'class=["\'][^"\']*\bretweet\b[^"\']*["\']', own_raw, re.I):
+        return "retweet css class"
 
     # 2. RSS tags / categories
     for tag_field in (entry.get("tags", []) or [], entry.get("categories", []) or []):
         for tag in tag_field:
             term = (tag.get("term") or tag.get("label")) if isinstance(tag, dict) else str(tag)
             if term and str(term).strip().lower() in {"rt", "retweet", "repost"}:
-                return True
+                return "retweet tag"
 
-    # 3. Text patterns in title and body
-    clean_title = clean_tweet_text(raw_title).lower()
-    clean_all = clean_tweet_text(combined_raw).lower()
-
-    title_patterns = [
-        r"^\s*rt\s+(?:by\s+)?@?",
-        r"^\s*rt\s*:\s*@?",
-        r"^\s*\[rt\]",
-        r"^\s*retweet(?:ed)?(?:\s+by)?\b",
-        r"^\s*repost(?:ed)?(?:\s+by)?\b",
+    # 3. Retweet banners. Bridges always render them on their own line, before the tweet
+    # text ("RT by @nasa: ...", "nasa retweeted"), so anchor every pattern to a line start —
+    # a post that merely talks about retweets ("I was retweeted by @nasa") is not one.
+    clean_all = clean_tweet_text(own_raw).lower()
+    banner_patterns = [
+        r"^\s*rt\s+(?:by\s+)?@?[a-z0-9_]{1,15}\b",
+        r"^\s*rt\s*[:\-]",
+        r"^\s*[\[(]\s*rt\s*[\])]",
+        r"^\s*(?:retweet|repost)(?:ed)?(?:\s+by)?\b",
         r"^\s*@?[a-z0-9_]{1,15}\s+(?:retweeted|reposted)\b",
-        r"\bretweeted\s+by\b",
-        r"\breposted\s+by\b",
-        r"\brt\s+by\s+@",
-        r"بازتوییت",
-        r"ریتوییت",
+        r"^\s*(?:@?[a-z0-9_]{1,15}\s+)?(?:retweeted|reposted)\s+by\s+@",
+        r"^\s*(?:بازتوییت|ریتوییت)\b",
     ]
-    if any(re.search(p, clean_title, re.I) for p in title_patterns):
-        return True
+    if any(re.search(pat, clean_all, re.I | re.M) for pat in banner_patterns):
+        return "retweet banner text"
 
-    general_patterns = [
-        r"\bretweeted\s+by\b",
-        r"\breposted\s+by\b",
-        r"\brt\s+by\s+@",
-        r"^\s*rt\s+@",
-    ]
-    if any(re.search(p, clean_all, re.I) for p in general_patterns):
-        return True
+    # 4. Ownership: whose tweet is this entry, really?
+    expected = _handle_or_empty(username) if username else ""
+    if not expected:
+        return None
+    link_username = extract_link_username(entry)
+    if link_username:
+        # A timeline feed links every item to that item's own status page, and on a retweet
+        # Nitter links (and credits) the original author instead. So a link pointing at a
+        # foreign handle is a repost, while a link pointing back at `expected` proves the
+        # entry belongs to the subscribed account no matter what the display name says.
+        if link_username != expected:
+            return f"status link is @{link_username}"
+        return None
+    author_username, author_explicit = extract_author_username(entry)
+    # Without a usable link, only an explicit @handle can accuse the entry; a display-name
+    # guess such as "RippleX" is not evidence (see _username_from_text).
+    if author_explicit and author_username != expected:
+        return f"author @{author_username}"
+    return None
 
-    # 4. Author and URL mismatch if expected username is provided
-    expected = clean_username(username) if username else ""
-    if expected:
-        link_username = extract_link_username(entry)
-        if link_username and link_username != expected:
-            return True
-        author_username = extract_author_username(entry)
-        if author_username and author_username != expected:
-            return True
-
-    return False
+def is_retweet(entry, username=None):
+    """Detect RSS entries that are retweets/reposts rather than tweets by `username`."""
+    return retweet_reason(entry, username) is not None
 
 def extract_image_url(entry):
     desc = entry.get("description", "") or entry.get("summary", "")
@@ -507,18 +571,26 @@ async def fetch_feed(username):
             feed = await asyncio.to_thread(feedparser.parse, resp.text)
             valid = []
             skipped_retweets = 0
+            usable_feed = False
             for entry in feed.entries:
-                if not extract_id(entry):
+                tid = extract_id(entry)
+                if not tid:
                     continue
-                if is_retweet(entry, target_username):
+                usable_feed = True
+                reason = retweet_reason(entry, target_username)
+                if reason:
                     skipped_retweets += 1
+                    logger.debug("Skip @%s %s: %s", target_username, tid, reason)
                     continue
                 valid.append(entry)
             if skipped_retweets:
                 logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, target_username)
-            if valid:
+            # A parsed feed is a complete answer even when it only held reposts; asking the
+            # next mirror would repeat the same result and burn its rate limit for nothing.
+            if usable_feed:
                 return valid
-        except Exception:
+        except Exception as e:
+            logger.debug("Feed %s failed: %s", url, e)
             continue
     return []
 
