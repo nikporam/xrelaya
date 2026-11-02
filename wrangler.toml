@@ -39,6 +39,10 @@ WEBHOOK_BUDGET = "20"
 FEED_MIRRORS = "6"
 FEED_BATCH = "3"
 MYMEMORY_SOURCE_LANG = "en"
+# Workers AI translation backend: auto (chat model, then m2m100) | chat | translate
+# WORKERS_AI_MODE = "auto"
+# WORKERS_AI_CHAT_MODEL = "@cf/zai-org/glm-4.7-flash"
+# WORKERS_AI_MODEL = "@cf/meta/m2m100-1.2b"
 # Only used by the /status message; the real schedule lives in [triggers] above.
 CHECK_INTERVAL = "300"
 # Optional: public dashboard URL used by the "🌐 داشبورد" button.
@@ -50,14 +54,19 @@ CHECK_INTERVAL = "300"
 [[d1_databases]]
 binding = "DB"
 database_name = "xrelaya-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "636e80e8-0539-43ef-8136-00b84dead660"
 
-# ── Optional: free Workers AI translation (no API key needed) ────────────
-# Uncomment these two lines to enable it. When no GEMINI/OPENAI/REQUESTY key
-# is configured the bot translates with @cf/meta/m2m100-1.2b instead.
-# Check what is active with: curl <worker>/health  (see "translation.providers")
-# [ai]
-# binding = "AI"
+# ── Workers AI translation (free, no API key, no credit card) ────────────
+# With this binding the bot translates on Cloudflare itself. A chat model is
+# used first because it writes natural Persian; m2m100 stays as the cheap
+# backup. Both free-tier friendly.
+#   WORKERS_AI_MODE        auto | chat | translate   (default: auto)
+#   WORKERS_AI_CHAT_MODEL  default @cf/zai-org/glm-4.7-flash
+#                          better: @cf/google/gemma-4-26b-a4b-it
+#   WORKERS_AI_MODEL       seq2seq backup (default @cf/meta/m2m100-1.2b)
+# Check what is active with: /status in Telegram or curl <worker>/health
+[ai]
+binding = "AI"
 
 # ── Secrets (never put these in this file) ───────────────────────────────
 # npx wrangler secret put TELEGRAM_BOT_TOKEN   # from @BotFather

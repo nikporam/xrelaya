@@ -149,11 +149,17 @@ npm test
 | `MYMEMORY_EMAIL` | خالی | ایمیل اختیاری برای سقف رایگان بالاتر MyMemory |
 | `SETUP_KEY` | خالی | کلید محافظ آدرس `/setup` |
 | `TELEGRAM_WEBHOOK_SECRET` | خالی | توکن تأیید هدر تلگرام؛ فقط `A-Z a-z 0-9 _ -` مجاز است |
-| `WORKERS_AI_MODEL` | `@cf/meta/m2m100-1.2b` | مدل ترجمه‌ی Workers AI (برای فارسی `m2m100` یا `nllb-200` خوب است) |
+| `WORKERS_AI_MODE` | `auto` | بک‌اند Workers AI: `auto` (اول مدل چت، بعد m2m100)، `chat`، `translate` |
+| `WORKERS_AI_CHAT_MODEL` | `@cf/zai-org/glm-4.7-flash` | مدل چت برای ترجمه (برای فارسی `@cf/google/gemma-4-26b-a4b-it` بهتر است، مصرف بیشتری دارد) |
+| `WORKERS_AI_MODEL` | `@cf/meta/m2m100-1.2b` | مدل ترجمه‌ی پشتیبان Workers AI (`nllb-200-distilled-600M` هم کار می‌کند) |
 | `DASHBOARD_URL` | دامنه Worker | آدرس داشبورد برای دکمه‌ی «🌐 داشبورد» |
 
-> متغیرهای غیرحساس را در بخش `[vars]` فایل `wrangler.toml` بگذار؛ مقادیر حساس را با `wrangler secret put`.
-> بخش `[ai]` در `wrangler.toml` ترجمه‌ی رایگان **Workers AI** را فعال می‌کند (بدون نیاز به کلید).
+### ترجمه‌ی رایگان بدون هیچ کلید API
+
+بخش `[ai]` در `wrangler.toml` به‌طور پیش‌فرض روشن است، پس ربات روی خود کلودفلر ترجمه می‌کند:
+یک مدل چت (`@cf/zai-org/glm-4.7-flash`) فارسیِ طبیعی می‌نویسد و `m2m100` پشتیبان ارزان است.
+بدون کلید، بدون کارت اعتباری، و چون درخواست‌ها از Worker بیرون نمی‌روند از بودجه‌ی ۵۰ subrequest چیزی کم نمی‌شود.
+`/status` می‌گوید کدام بک‌اند و کدام مدل فعال است.
 
 **دیدن وضعیت واقعی:**
 ```bash

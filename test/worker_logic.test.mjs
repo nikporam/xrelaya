@@ -30,6 +30,8 @@ import {
 } from '../lib/rss.js';
 import { createBudget } from '../lib/budget.js';
 import {
+  TRANSLATION_SYSTEM_PROMPT,
+  WORKERS_AI_CHAT_MODEL,
   clearTranslationCache,
   inferProvider,
   translateDetailed,
@@ -38,6 +40,7 @@ import {
   translationCacheSize,
   translationStatus,
   workersAiLanguage,
+  workersAiLanguagePairs,
 } from '../lib/translate.js';
 import { validateWebhookSecret } from '../lib/telegram.js';
 
@@ -511,11 +514,52 @@ test('workersAiLanguage maps ISO codes to the names m2m100 expects', () => {
   assert.equal(workersAiLanguage(undefined, 'fallback'), 'fallback');
 });
 
-test('Workers AI is called with full language names', async () => {
+test('workersAiLanguagePairs switches vocabulary per model family', () => {
+  assert.deepEqual(workersAiLanguagePairs('en', '@cf/meta/m2m100-1.2b')[0], ['english', 'persian']);
+  assert.deepEqual(workersAiLanguagePairs('en', '@cf/meta/nllb-200-distilled-600M')[0], [
+    'eng_Latn',
+    'pes_Arab',
+  ]);
+  // Unknown language still gets a usable nllb code instead of a crash.
+  assert.deepEqual(workersAiLanguagePairs('xx', '@cf/meta/nllb-200-distilled-600M')[0], [
+    'eng_Latn',
+    'pes_Arab',
+  ]);
+});
+
+test('Workers AI defaults to a chat model, which translates Persian better', async () => {
   clearTranslationCache();
   const calls = [];
   const env = {
     TRANSLATE_FA: 'true',
+    AI: {
+      run: async (model, params) => {
+        calls.push({ model, params });
+        return { choices: [{ message: { content: 'سلام دنیا' } }] };
+      },
+    },
+  };
+  const result = await translateText(env, 'Hello world', createBudget(20));
+  assert.equal(result, 'سلام دنیا');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, WORKERS_AI_CHAT_MODEL);
+  // Same instructions the Gemini/OpenAI path uses.
+  assert.equal(calls[0].params.messages[0].content, TRANSLATION_SYSTEM_PROMPT);
+  assert.equal(calls[0].params.messages[1].content, 'Hello world');
+});
+
+test('Workers AI chat response shape (response key) is understood too', async () => {
+  clearTranslationCache();
+  const env = { TRANSLATE_FA: 'true', AI: { run: async () => ({ response: 'سلام' }) } };
+  assert.equal(await translateText(env, 'Hi there friends', createBudget(20)), 'سلام');
+});
+
+test('WORKERS_AI_MODE=translate uses full language names for m2m100', async () => {
+  clearTranslationCache();
+  const calls = [];
+  const env = {
+    TRANSLATE_FA: 'true',
+    WORKERS_AI_MODE: 'translate',
     AI: {
       run: async (model, params) => {
         calls.push({ model, params });
@@ -529,6 +573,67 @@ test('Workers AI is called with full language names', async () => {
   assert.equal(calls[0].params.source_lang, 'english');
   assert.equal(calls[0].params.target_lang, 'persian');
   assert.equal(calls[0].model, '@cf/meta/m2m100-1.2b');
+});
+
+test('nllb gets FLORES-200 codes instead of language names', async () => {
+  clearTranslationCache();
+  const calls = [];
+  const env = {
+    TRANSLATE_FA: 'true',
+    WORKERS_AI_MODE: 'translate',
+    WORKERS_AI_MODEL: '@cf/meta/nllb-200-distilled-600M',
+    AI: {
+      run: async (model, params) => {
+        calls.push({ model, params });
+        return { translated_text: 'سلام' };
+      },
+    },
+  };
+  await translateText(env, 'Hello world', createBudget(20));
+  assert.equal(calls[0].params.source_lang, 'eng_Latn');
+  assert.equal(calls[0].params.target_lang, 'pes_Arab');
+});
+
+test('WORKERS_AI_MODE=chat never falls back to the seq2seq model', async () => {
+  clearTranslationCache();
+  const calls = [];
+  const env = {
+    TRANSLATE_FA: 'true',
+    WORKERS_AI_MODE: 'chat',
+    AI: {
+      run: async (model) => {
+        calls.push(model);
+        throw new Error('model unavailable');
+      },
+    },
+  };
+  await withMockFetch(
+    async () => new Response('nope', { status: 500 }),
+    async () => {
+      const detail = await translateDetailed(env, 'Hello world', createBudget(20));
+      assert.equal(detail.translation, '');
+      // Retried, but never with the seq2seq model.
+      assert.ok(calls.length >= 1);
+      assert.deepEqual([...new Set(calls)], [WORKERS_AI_CHAT_MODEL]);
+    }
+  );
+});
+
+test('chat failure falls back to m2m100 inside Workers AI', async () => {
+  clearTranslationCache();
+  const models = [];
+  const env = {
+    TRANSLATE_FA: 'true',
+    AI: {
+      run: async (model) => {
+        models.push(model);
+        if (model === WORKERS_AI_CHAT_MODEL) throw new Error('no such model');
+        return { translated_text: 'ترجمه پشتیبان' };
+      },
+    },
+  };
+  assert.equal(await translateText(env, 'Hello world', createBudget(20)), 'ترجمه پشتیبان');
+  assert.deepEqual(models.slice(0, 2), [WORKERS_AI_CHAT_MODEL, '@cf/meta/m2m100-1.2b']);
 });
 
 test('Workers AI failure is reported instead of being swallowed', async () => {
@@ -595,6 +700,13 @@ test('translationStatus reports the real configuration', () => {
 
   const withWorkersAi = translationStatus({ AI: { run: () => {} } });
   assert.equal(withWorkersAi.primary, 'workers-ai');
+  const workersProvider = withWorkersAi.providers.find((p) => p.name === 'workers-ai');
+  assert.equal(workersProvider.mode, 'auto');
+  assert.equal(workersProvider.model, WORKERS_AI_CHAT_MODEL);
+
+  // mode=translate reports the seq2seq model, not the chat one.
+  const seq2seq = translationStatus({ AI: { run: () => {} }, WORKERS_AI_MODE: 'translate' });
+  assert.equal(seq2seq.providers.find((p) => p.name === 'workers-ai').model, '@cf/meta/m2m100-1.2b');
 
   const placeholder = translationStatus({ GEMINI_API_KEY: 'your_gemini_api_key' });
   assert.equal(placeholder.primary, 'google-endpoint');
