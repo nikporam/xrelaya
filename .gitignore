@@ -1,12 +1,18 @@
+# Local secrets & build artifacts
 .env
 .dev.vars
-__pycache__/
-*.pyc
-*.pyo
-.DS_Store
-*.db
-venv/
-.venv/
-node_modules/
-.wrangler/
 
+# Cloudflare / Wrangler
+.wrangler/
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*

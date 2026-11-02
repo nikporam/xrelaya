@@ -4,7 +4,7 @@
 
 # 🐦 ربات تلگرام فالوور توییتر / X
 
-> بدون نیاز به API پولی توییتر — با RSS کار میکنه.
+> بدون نیاز به API پولی توییتر — با RSS کار میکنه، روی **Cloudflare Workers** رایگان اجرا میشه.
 > هر وقت اکانت‌هایی که اضافه کردی توییت جدید بزنن، مستقیم داخل تلگرام برات میفرسته. با متن + عکس + ترجمه فارسی.
 
 ---
@@ -12,11 +12,12 @@
 ### ✨ امکانات
 
 - 🔔 ارسال خودکار توییت‌ها به تلگرام با عکس
-- 🦁 ترجمه فارسی خودکار (با هوش مصنوعی یا Google Translate)
+- 🦁 ترجمه فارسی خودکار (AI یا Workers AI رایگان یا Google/MyMemory)
 - 🚫 فیلتر خودکار ریتوییت‌ها / repostها (بدون افتادن اکانت‌هایی که نام نمایشی‌شان شبیه یوزرنیم است، مثل RippleX)
-- 📊 داشبورد وب زنده (PWA)
-- ⚡ پشتیبانی از چندین اکانت با دریافت و ترجمه کنترل‌شده برای جلوگیری از محدودیت سرویس‌ها
-- 🔄 بررسی خودکار هر ۵ دقیقه
+- 📊 داشبورد وب زنده (PWA) روی همان Worker
+- ⚡ پشتیبانی از چندین اکانت با بررسی گردشی و بودجه‌ی درخواست کنترل‌شده
+- 🔄 بررسی خودکار هر ۵ دقیقه با Cron کلودفلر
+- 💾 دیتابیس D1 کلودفلر — بدون سرور و بدون PostgreSQL
 
 ---
 
@@ -28,43 +29,92 @@
 
 ---
 
-### ۲. نصب و راه‌اندازی
+### ۲. پیش‌نیازها
+
+- **Node.js 20+**
+- یک اکانت **Cloudflare** (پلن رایگان کافی است)
+- ابزار `wrangler` که با `npm install` نصب می‌شود
 
 ```bash
-# کلون کردن پروژه
-git clone https://github.com/YOUR_USER/twitter-telegram-bot.git
-cd twitter-telegram-bot
-
-# نصب وابستگی‌ها
-pip install -r requirements.txt
-```
-
-یک فایل `.env` بساز و این داخلش بزار:
-
-```env
-TELEGRAM_BOT_TOKEN=توکنی که از BotFather گرفتی
-ADMIN_CHAT_ID=چت آیدی خودت (اختیاری)
-
-# ترجمه فارسی (اختیاری)
-TRANSLATE_FA=true
-# می‌تونی REQUESTY_API_KEY یا GEMINI_API_KEY استفاده کنی
-REQUESTY_API_KEY=your_requesty_or_gemini_key
-REQUESTY_BASE_URL=https://api.openai.com/v1
-REQUESTY_MODEL=gpt-4o-mini
+git clone https://github.com/nikporam/xrelaya.git
+cd xrelaya
+npm install
+npx wrangler login
 ```
 
 ---
 
-### ۳. تست لوکال
+### ۳. ساخت دیتابیس D1
 
 ```bash
-# اجرای مستقیم
-python twitter_telegram_bot.py
+npx wrangler d1 create xrelaya-db
 ```
 
-ربات روشن میشه. یه پیام `/start` بفرست به رباتت توی تلگرام.
+خروجی این دستور یک `database_id` می‌دهد؛ آن را در `wrangler.toml` جایگزین کن:
 
-**دستورات تلگرام:**
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "xrelaya-db"
+database_id = "اینجا-مقدار-واقعی-را-بگذار"
+```
+
+بعد جدول‌ها را بساز:
+
+```bash
+npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
+```
+
+---
+
+### ۴. توکن‌ها و کلیدهای امنیتی
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN        # توکن BotFather (الزامی)
+npx wrangler secret put SETUP_KEY                 # محافظ آدرس /setup (الزامی)
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET   # اختیاری ولی توصیه می‌شود
+npx wrangler secret put GEMINI_API_KEY            # اختیاری، ترجمه باکیفیت‌تر
+```
+
+> کلیدهای AI اختیاری‌اند: `GEMINI_API_KEY` یا `OPENAI_API_KEY` یا `REQUESTY_API_KEY`.
+
+---
+
+### ۵. انتشار
+
+```bash
+npx wrangler deploy
+```
+
+بعد از deploy **فقط یک‌بار** این آدرس را باز کن تا وبهوک تلگرام و منوی دستورات ثبت شود:
+
+```
+https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
+```
+
+خروجی JSON نشان می‌دهد هر مرحله (`database`, `getMe`, `setMyCommands`, `setWebhook`) موفق بوده یا نه.
+داشبورد هم روی همان دامنه (`/`) بالا می‌آید و `/health` وضعیت کلی را برمی‌گرداند.
+
+بعد از این مرحله، در تلگرام به ربات `/start` بفرست.
+
+---
+
+### ۶. تست لوکال
+
+```bash
+cp dev.vars.example .dev.vars     # توکن و کلیدها را داخلش بگذار
+npx wrangler dev                  # http://localhost:8787
+```
+
+برای تست منطق بدون Cloudflare:
+
+```bash
+npm test
+```
+
+---
+
+### 📱 دستورات تلگرام
 
 | دستور | توضیح |
 |-------|-------|
@@ -74,79 +124,8 @@ python twitter_telegram_bot.py
 | `/del vitalikbuterin` | حذف اکانت |
 | `/list` | لیست اکانت‌های دنبال‌شده |
 | `/test` | تست سریع با @ElonMusk |
-
----
-
-### ۴. دیتابیس (PostgreSQL)
-
-برای استفاده از Railway رایگان:
-
-1. Railway.app → یه پروژه بساز
-2. PostgreSQL دیتابیس اضافه کن
-3. متغیر `DATABASE_URL` خودکار ست میشه
-
----
-
-### ۵. اجرای رایگان روی Cloudflare Workers (بدون سرور)
-
-همین ربات + داشبورد + دیتابیس، بدون هیچ سرور و VPS، روی **پلن رایگان Cloudflare** هم اجرا می‌شود.
-فایل‌های مربوطه: `worker.js` (منطق ربات) و پوشه `lib/` (فیلتر ریتوییت، ترجمه، RSS، D1، تلگرام) و `dashboard.html` (داشبورد).
-
-| نسخه پایتون (Railway/VPS) | نسخه Cloudflare |
-|---|---|
-| `python-telegram-bot` + Long Polling | **Webhook** تلگرام (`POST /telegram`) |
-| `job_queue` هر ۵ دقیقه | **Cron Trigger** کلودفلر |
-| PostgreSQL + `psycopg2` | **Cloudflare D1** (SQLite) |
-| FastAPI + Jinja | خود Worker + `dashboard.html` |
-
-**پیش‌نیاز:** Node.js 20+ و یک اکانت Cloudflare (پلن رایگان کافی است).
-
-```bash
-npm install
-
-# ۱) ساخت دیتابیس D1 — مقدار database_id خروجی را در wrangler.toml بگذار
-npx wrangler d1 create xrelaya-db
-
-# ۲) ساخت جدول‌ها
-npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
-
-# ۳) توکن‌ها و کلیدهای امنیتی
-npx wrangler secret put TELEGRAM_BOT_TOKEN     # از BotFather
-npx wrangler secret put SETUP_KEY              # محافظ آدرس /setup
-npx wrangler secret put TELEGRAM_WEBHOOK_SECRET  # اختیاری ولی توصیه می‌شود
-npx wrangler secret put GEMINI_API_KEY         # اختیاری، ترجمه باکیفیت‌تر
-
-# ۴) انتشار
-npx wrangler deploy
-```
-
-بعد از deploy فقط یک‌بار این آدرس را باز کن تا وب‌هوک تلگرام و منوی دستورات ثبت شود:
-
-```
-https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
-```
-
-خروجی JSON نشان می‌دهد هر مرحله (`database`, `getMe`, `setMyCommands`, `setWebhook`) موفق بوده یا نه.
-داشبورد هم روی همان دامنه (`/`) بالا می‌آید.
-
-**نکته‌های مهم Cloudflare:**
-
-- **کرون هر ۵ دقیقه** اجرا می‌شود (`triggers.crons` در `wrangler.toml`) و در هر اجرا به‌صورت گردشی (`ACCOUNTS_PER_CRON`) چند اکانت را چک می‌کند؛ پس با هر تعداد اکانت، همه‌شان به‌ترتیب بررسی می‌شوند.
-- **سقف ۵۰ درخواست خروجی در هر اجرا (پلن رایگان):** ربات خودش بودجه‌ی `SUBREQUEST_BUDGET` را رعایت می‌کند و اگر کم بیاید، بقیه توییت‌ها را به اجرای بعدی موکول می‌کند (هیچ توییتی از دست نمی‌رود و ارسال تکراری هم نداریم).
-- **ترجمه رایگان بدون API Key:** اگر در `wrangler.toml` بخش `[ai]` را از کامنت خارج کنی، ترجمه با مدل رایگان Workers AI (`@cf/meta/m2m100-1.2b`) انجام می‌شود؛ در غیر این صورت همان Google/MyMemory fallback کار می‌کند.
-- **تغییر میرورهای Nitter بدون deploy:** متغیر `RSS_MIRRORS` را با لیست دلخواه (جدا شده با کاما و حاوی `{username}`) ست کن.
-- **اجرای لوکال:** `cp dev.vars.example .dev.vars` و بعد `npx wrangler dev`.
-- **تست منطق بدون Cloudflare:** `npm test` (تست‌های فیلتر ریتوییت، ساخت کارت پیام، پارس RSS و ترجمه).
-
-### ۶. هاست ۲۴ ساعته رایگان
-
-برای اینکه همیشه روشن باشه، روی یکی از اینها رایگان دیپلوی کن:
-
-- **Railway.app** — ساده‌ترین (۵$ credit رایگان ماهانه)
-- **Render.com** — plan رایگان
-- یا روی یک سرور VPS خودت
-
-فقط کافیه فایل‌ها رو آپلود کنی و متغیرهای محیطی رو ست کنی.
+| `/search متن` | جستجو در توییت‌های ذخیره‌شده |
+| `/status` | وضعیت ربات |
 
 ---
 
@@ -154,66 +133,61 @@ https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
 
 | متغیر | پیش‌فرض | توضیح |
 |-------|---------|-------|
-| `CHECK_INTERVAL` | `300` | فاصله بررسی (ثانیه) |
-| `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
-| `CONCURRENT_LIMIT` | `3` | تعداد درخواست همزمان برای دریافت فید |
+| `CHECK_INTERVAL` | `300` | فاصله بررسی (فقط برای نمایش در `/status`) |
+| `ACCOUNTS_PER_CRON` | `5` | تعداد اکانتی که در هر اجرای کرون بررسی می‌شود |
+| `MAX_TWEETS_PER_CHECK` | `3` | تعداد توییت جدید پردازش‌شده برای هر اکانت در هر اجرا |
+| `SUBREQUEST_BUDGET` | `42` | سقف درخواست خروجی در هر اجرا؛ کمتر از سقف ۵۰ پلن رایگان |
+| `WEBHOOK_BUDGET` | `20` | سقف درخواست خروجی در هر آپدیت تلگرام |
+| `RSS_MIRRORS` | خالی | لیست میرورهای Nitter جدا شده با کاما، با پلیس‌هولدر `{username}` |
+| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | تعداد میرورهای هر اکانت و تعداد درخواست موازی |
+| `TRANSLATE_FA` | `true` | فعال بودن ترجمه فارسی |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` / `REQUESTY_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
 | `TRANSLATION_TIMEOUT` | `20` | تایم‌اوت هر تلاش ترجمه (ثانیه) |
-| `TRANSLATION_RETRIES` | `2` | تعداد تلاش دوباره برای تلاش‌های اصلی AI/Google |
-| `TRANSLATION_CONCURRENT_LIMIT` | `1` | تعداد ترجمه همزمان (برای جلوگیری از محدودیت گوگل کم نگه دار) |
-| `TRANSLATION_BACKFILL_LIMIT` | `15` | تعداد توییت‌های بدون ترجمه که در هر نوبت ترمیم می‌شوند |
-| `MAX_TWEETS_PER_CHECK` | `10` | تعداد توییت جدید پردازش‌شده برای هر اکانت در هر بررسی |
-| `MYMEMORY_SOURCE_LANG` | `en` | زبان مبدأ برای fallback غیرگوگلی ترجمه |
+| `TRANSLATION_RETRIES` | `2` | تعداد تلاش دوباره برای هر سرویس ترجمه |
+| `TRANSLATION_BACKFILL_LIMIT` | `5` | تعداد توییت بدون ترجمه که در هر اجرا ترمیم می‌شود |
+| `MYMEMORY_SOURCE_LANG` | `en` | زبان مبدأ برای fallback غیرگوگلی |
 | `MYMEMORY_EMAIL` | خالی | ایمیل اختیاری برای سقف رایگان بالاتر MyMemory |
-| `LOG_LEVEL` | `INFO` | روی `DEBUG` بگذار تا دلیل نگه‌داشتن یا حذف هر آیتم فید لاگ شود |
-| `ACCOUNTS_PER_CRON` | `5` | (Cloudflare) تعداد اکانتی که در هر اجرای کرون بررسی می‌شود |
-| `MAX_TWEETS_PER_CHECK` | `3` | (Cloudflare) تعداد توییت جدید پردازش‌شده برای هر اکانت در هر اجرا |
-| `SUBREQUEST_BUDGET` | `42` | (Cloudflare) سقف درخواست خروجی در هر اجرا؛ کمتر از سقف ۵۰ پلن رایگان |
-| `RSS_MIRRORS` | خالی | (Cloudflare) لیست میرورهای Nitter جدا شده با کاما، با پلیس‌هولدر `{username}` |
-| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | (Cloudflare) تعداد میرورهای هر اکانت و تعداد درخواست موازی |
-| `SETUP_KEY` | خالی | (Cloudflare) کلید محافظ آدرس `/setup` |
-| `TELEGRAM_WEBHOOK_SECRET` | خالی | (Cloudflare) توکن تأیید هدر تلگرام برای وبهوک |
+| `SETUP_KEY` | خالی | کلید محافظ آدرس `/setup` |
+| `TELEGRAM_WEBHOOK_SECRET` | خالی | توکن تأیید هدر تلگرام برای وبهوک |
+| `DASHBOARD_URL` | دامنه Worker | آدرس داشبورد برای دکمه‌ی «🌐 داشبورد» |
+
+> متغیرهای غیرحساس را در بخش `[vars]` فایل `wrangler.toml` بگذار؛ مقادیر حساس را با `wrangler secret put`.
+> بخش `[ai]` در `wrangler.toml` ترجمه‌ی رایگان **Workers AI** را فعال می‌کند (بدون نیاز به کلید).
 
 ---
 
 ### 📝 نکات
 
-- اکانت‌های **خصوصی / Private** کار نمیکنن
+- اکانت‌های **خصوصی / Private** کار نمیکنن (محدودیت RSS)
 - اگر یک Nitter فیلتر بود، ربات خودش از بقیه امتحان میکنه
 - ریتوییت‌ها/repostها فیلتر میشن و ارسال نمیشن؛ فیلتر فقط به یوزرنیم واقعی (یعنی لینک استاتوس یا `@handle` موجود در فید) نگاه می‌کنه و نام نمایشی هرگز جای یوزرنیم حساب نمیشه
-- با `LOG_LEVEL=DEBUG` دلیل حذف هر توییت لاگ میشه (مثلاً `Skip @nasa 123: status link is @nasa`)
-- هر توییت به صورت یک کارت تکی در تلگرام ارسال می‌شود؛ در صورت طولانی شدن کپشن، متن و ترجمه به صورت خودکار خلاصه می‌شوند و هرگز پیام جداگانه‌ای ارسال نمی‌شود
-- ترجمه با چند بار تلاش دوباره انجام میشه و اگر AI خطا بده، از Google/MyMemory fallback استفاده میشه
-- توییت‌های ذخیره‌شده‌ای که ترجمه خالی دارند، به صورت خودکار در پس‌زمینه برای دیتابیس و داشبورد بک‌فیل می‌شوند و پیام جداگانه به تلگرام فرستاده نمی‌شود
-- توییت‌ها با عکس هم ارسال میشن
-- تصاویر با lazy loading در وب داشبورد بارگذاری میشن
-- Service Worker برای حالت آفلاین فعاله
+- هر توییت به صورت یک کارت تکی در تلگرام ارسال می‌شود؛ در صورت طولانی شدن کپشن، متن و ترجمه به صورت خودکار خلاصه می‌شوند
+- ترجمه با چند بار تلاش دوباره انجام میشه و اگر AI خطا بده، از Workers AI / Google / MyMemory استفاده میشه
+- توییت‌های ذخیره‌شده‌ای که ترجمه خالی دارند، در اجراهای بعدی برای داشبورد بک‌فیل می‌شوند (بدون پیام تکراری در تلگرام)
+- توییت‌ها با عکس ارسال میشن؛ عکس قبل از ارسال دانلود می‌شود تا تلگرام به pbs.twimg.com وابسته نباشد
+- تصاویر با lazy loading در داشبورد بارگذاری میشن و Service Worker برای حالت آفلاین فعاله
+- داده‌های قدیمی هر روز ساعت ۳ بامداد UTC پاک‌سازی میشن (۳۰ روز برای `sent_ids`، نگه‌داشتن ۳۰۰ توییت آخر)
 
 ---
 
 ### 🛠 ساختار پروژه
 
 ```
-twitter-telegram-bot/
-├── twitter_telegram_bot.py   # ربات اصلی + وب سرور (نسخه پایتون)
-├── database.py               # مدیریت PostgreSQL (نسخه پایتون)
-├── web_server.py             # سرور وب (اختیاری)
-├── templates/index.html      # قالب داشبورد وب (نسخه پایتون)
-├── sw.js                     # Service Worker
-├── manifest.json             # PWA Manifest
-├── requirements.txt          # وابستگی‌ها
-├── Procfile                  # فایل هاست
-│
-├── worker.js                 # ⚡ ربات کامل برای Cloudflare Workers
-├── dashboard.html            # داشبورد نسخه Cloudflare
-├── lib/                      # ماژول‌های Worker
+xrelaya/
+├── worker.js                 # ⚡ ربات کامل: وبهوک، کرون، داشبورد، /setup
+├── dashboard.html            # داشبورد وب (PWA)
+├── lib/
 │   ├── rss.js                #   پارس فید + فیلتر ریتوییت
-│   ├── text.js               #   ساخت کارت پیام/ترجمه متن
-│   ├── translate.js          #   ترجمه با AI/Google/MyMemory/Workers AI
+│   ├── text.js               #   ساخت کارت پیام و ابزارهای متن
+│   ├── translate.js          #   ترجمه با AI / Workers AI / Google / MyMemory
 │   ├── db.js                 #   لایه Cloudflare D1
 │   ├── telegram.js           #   کلاینت Bot API
-│   └── budget.js             #   محدودکننده درخواست‌های خروجی
+│   └── budget.js             #   بودجه‌ی درخواست‌های خروجی
 ├── schema.sql                # جدول‌های D1
 ├── wrangler.toml             # تنظیمات Cloudflare
 ├── package.json              # اسکریپت‌های deploy/test
-└── dev.vars.example          # نمونه متغیرهای اجرای لوکال
+├── dev.vars.example          # نمونه متغیرهای اجرای لوکال
+├── test/worker_logic.test.mjs
+├── README_FA.md              # 🇮🇷 همین فایل
+└── README.md                 # 🇬🇧 مستندات انگلیسی
 ```
