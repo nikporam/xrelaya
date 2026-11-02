@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS tweets_content (
     created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- Small key/value store for diagnostics (e.g. why the last translation failed).
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_subs_username ON subscriptions(username);
 CREATE INDEX IF NOT EXISTS idx_tweets_created ON tweets_content(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sent_created ON sent_ids(created_at);

@@ -31,7 +31,9 @@ import {
 import { createBudget } from '../lib/budget.js';
 import {
   clearTranslationCache,
+  inferProvider,
   translateDetailed,
+  translationConfig,
   translateText,
   translationCacheSize,
   translationStatus,
@@ -611,4 +613,72 @@ test('validateWebhookSecret accepts only characters Telegram allows', () => {
   assert.match(validateWebhookSecret('secret.token'), /rejects/);
   assert.match(validateWebhookSecret('محرمانه'), /rejects/);
   assert.match(validateWebhookSecret('a'.repeat(257)), /256/);
+});
+
+
+/* ── provider inference from the key itself ───────────────────────────── */
+
+test('a Gemini key pasted into REQUESTY_API_KEY still reaches Gemini', () => {
+  // This exact mistake sent real requests to a third-party default endpoint
+  // (or to api.openai.com) and every translation failed with 401/404.
+  const config = translationConfig({ REQUESTY_API_KEY: 'AIzaSyD-abcdefghijklmnop' });
+  assert.equal(config.provider, 'gemini');
+  assert.equal(config.baseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai');
+  assert.equal(config.model, 'gemini-2.0-flash');
+  assert.equal(config.keySource, 'REQUESTY_API_KEY');
+});
+
+test('an OpenAI key is routed to OpenAI', () => {
+  const config = translationConfig({ GEMINI_API_KEY: 'sk-proj-abcdefghijklmnop' });
+  assert.equal(config.provider, 'openai');
+  assert.equal(config.baseUrl, 'https://api.openai.com/v1');
+  assert.equal(config.model, 'gpt-4o-mini');
+});
+
+test('explicit configuration still wins over key sniffing', () => {
+  const config = translationConfig({
+    GEMINI_API_KEY: 'AIzaSyD-abcdefghijklmnop',
+    REQUESTY_BASE_URL: 'https://example.test/v1',
+    REQUESTY_MODEL: 'my-model',
+  });
+  assert.equal(config.provider, 'custom');
+  assert.equal(config.baseUrl, 'https://example.test/v1');
+  assert.equal(config.model, 'my-model');
+});
+
+test('inferProvider reports the variable that supplied the key', () => {
+  assert.equal(inferProvider({}, ''), 'custom');
+  assert.equal(inferProvider({ GEMINI_API_KEY: 'AIzaSyD-abcdefghijklmnop' }, ''), 'gemini');
+  assert.equal(inferProvider({ OPENAI_API_KEY: 'sk-abcdefghijklmnop' }, ''), 'openai');
+  assert.equal(inferProvider({}, 'sk-abcdefghijklmnop'), 'openai');
+});
+
+test('translationStatus exposes the endpoint and key source', () => {
+  const status = translationStatus({ GEMINI_API_KEY: 'AIzaSyD-abcdefghijklmnop' });
+  assert.equal(status.primary, 'ai');
+  assert.equal(status.ai.keySource, 'GEMINI_API_KEY');
+  assert.equal(status.ai.provider, 'gemini');
+  assert.equal(status.ai.model, 'gemini-2.0-flash');
+});
+
+test('an exhausted budget skips fetch providers but keeps the reasons', async () => {
+  clearTranslationCache();
+  const budget = createBudget(1);
+  budget.take(1);
+
+  await withMockFetch(
+    async () => {
+      throw new Error('should not be called');
+    },
+    async () => {
+      const detail = await translateDetailed({ TRANSLATE_FA: 'true' }, 'Hello world', budget);
+      assert.equal(detail.translation, '');
+      const providers = detail.failures.map((failure) => failure.provider);
+      assert.ok(providers.includes('google-endpoint'));
+      assert.match(
+        detail.failures.find((failure) => failure.provider === 'google-endpoint').reason,
+        /budget/
+      );
+    }
+  );
 });

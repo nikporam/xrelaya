@@ -231,7 +231,9 @@ Uncommenting the `[ai]` block enables free **Workers AI** translation (no API ke
 - ✅ One Telegram card per tweet: long captions are auto-truncated, never split
 - ✅ Translation falls back through Workers AI → Google → MyMemory, and empty results are never cached
 - ✅ Workers AI receives full language names (`english`/`persian`); the short ISO codes it rejects are never sent
-- ✅ `/health` reports `translation.providers` and the real `webhook` state, and `/test <user>` explains each translation failure
+- ✅ `/health` reports `translation.providers`, `lastTranslationFailure` and the real `webhook` state; `/test <user>` explains each failure in Telegram
+- ✅ `/translate?key=<SETUP_KEY>` runs the real provider chain on a sample sentence and returns the per-provider reasons
+- ✅ A key pasted into the wrong variable is routed by its shape (`AIza…` → Gemini, `sk-…` → OpenAI)
 - ✅ `SETUP_KEY` and `TELEGRAM_WEBHOOK_SECRET` are compared trimmed, so a stray space no longer breaks setup
 - ✅ `secret_token` is validated locally before Telegram sees it, with a readable reason instead of an opaque 400
 - ✅ Saved tweets with empty translations are backfilled for the dashboard (no duplicate Telegram messages)

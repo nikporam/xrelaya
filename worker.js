@@ -35,6 +35,7 @@ import {
   ensureSchema,
   getAllTracked,
   getLatestTweets,
+  getMeta,
   getSubsForChat,
   getSubsForUser,
   getTweetsMissingTranslation,
@@ -45,6 +46,7 @@ import {
   removeSubscription,
   saveTweetContent,
   searchTweets,
+  setMeta,
   touchChecked,
   updateLastId,
   updateTweetTranslation,
@@ -214,9 +216,25 @@ export async function processAccount(env, account, budget) {
     }
     const content = await buildContent(env, username, entry, budget);
     if (!content) continue;
+    if (!content.translation) await rememberTranslationFailure(env, content);
     const handled = await deliver(env, content, subs, budget);
     if (handled) await updateLastId(env, username, tid);
   }
+}
+
+
+// Keep the last translation failure in D1 so a card that arrives without a
+// translation can be explained afterwards ("why is there no Persian text?").
+async function rememberTranslationFailure(env, content) {
+  const detail = {
+    username: content.username,
+    tweet: String(content.title || '').slice(0, 120),
+    skipped: content.translationSkipped || null,
+    failures: (content.translationFailures || []).slice(0, 4),
+    ts: new Date().toISOString(),
+  };
+  console.warn('Translation missing:', JSON.stringify(detail));
+  await setMeta(env, 'last_translation_failure', detail);
 }
 
 async function backfillTranslations(env, budget, config) {
@@ -371,9 +389,23 @@ async function replyStatus(env, chatId, budget) {
     `🌐 <b>اکانت‌های کل:</b> ${tracked.length}`,
     `⏱ <b>بررسی هر:</b> ${env.CHECK_INTERVAL || 300} ثانیه`,
   ];
+  if (byName.ai.enabled && status.ai) {
+    lines.push(`  ↳ کلید: ${escapeHtml(status.ai.keySource || 'نامشخص')} • مدل: ${escapeHtml(status.ai.model || '')}`);
+  }
   if (!byName.ai.enabled && !byName['workers-ai'].enabled) {
     lines.push('', '💡 برای ترجمه باکیفیت: /setup یا یک GEMINI_API_KEY ست کن،', '   یا در wrangler.toml بخش [ai] را فعال کن.');
   }
+
+  // Last real failure, so "why is there no Persian text?" has an answer.
+  const lastFailure = await getMeta(env, 'last_translation_failure');
+  if (lastFailure?.value) {
+    const info = lastFailure.value;
+    const reason = info.skipped
+      ? info.skipped
+      : (info.failures || []).map((f) => `${f.provider}: ${f.reason}`).join(' | ');
+    lines.push('', `🕓 <b>آخرین خطای ترجمه</b> (${escapeHtml(String(lastFailure.updated_at || ''))})`, `<code>${escapeHtml(String(reason || 'نامشخص').slice(0, 220))}</code>`);
+  }
+
   await reply(env, chatId, lines.join('\n'), { budget });
 }
 
@@ -835,6 +867,54 @@ async function handleSetup(request, env) {
   return jsonResponse(result, result.ok ? 200 : 500);
 }
 
+
+// Live translation probe: runs the real provider chain on a sample sentence
+// and returns exactly what happened. Solves the "I set an API key but nothing
+// is translated" loop, since every provider's reason is included.
+async function handleTranslateTest(request, env, url) {
+  const key = String(url.searchParams.get('key') || request.headers.get('X-Setup-Key') || '').trim();
+  if (!String(env.SETUP_KEY || '').trim() || key !== String(env.SETUP_KEY).trim()) {
+    return jsonResponse({ ok: false, error: 'invalid setup key' }, 403);
+  }
+
+  // The probe writes its result to bot_meta, so the schema must exist even on
+  // a fresh deployment where /setup was never called.
+  await ensureSchema(env);
+
+  const sample =
+    String(url.searchParams.get('q') || '').trim() ||
+    'Hello world, this is a translation test from XRelaya.';
+
+  const status = translationStatus(env);
+  const budget = createBudget(botConfig(env).webhookBudget);
+  const detail = await translateDetailed(env, sample, budget);
+
+  const ok = Boolean(detail.translation);
+  if (!ok) await setMeta(env, 'last_translation_failure', {
+    username: 'translate-test',
+    tweet: sample.slice(0, 120),
+    skipped: detail.skipped || null,
+    failures: detail.failures,
+    ts: new Date().toISOString(),
+  });
+
+  return jsonResponse(
+    {
+      ok,
+      input: sample,
+      translation: detail.translation || null,
+      provider: detail.provider || null,
+      skipped: detail.skipped || null,
+      failures: detail.failures,
+      config: status.ai || { keySource: null, provider: null, model: null },
+      hint: ok
+        ? 'Translation works. New tweets will include the Persian text.'
+        : 'No provider produced a translation. Fix the first failure listed above, or set GEMINI_API_KEY / enable the [ai] binding.',
+    },
+    ok ? 200 : 502
+  );
+}
+
 async function handleHealth(env) {
   const translation = translationStatus(env);
   const secretError = validateWebhookSecret(env.TELEGRAM_WEBHOOK_SECRET);
@@ -854,6 +934,7 @@ async function handleHealth(env) {
   }
   await ensureSchema(env);
   const [accounts, tweets] = await Promise.all([getAllTracked(env), countTweets(env)]);
+  const lastTranslationFailure = await getMeta(env, 'last_translation_failure');
 
   // Tell the truth about the delivery path: a webhook that was never
   // registered is the single most common reason the bot stays silent.
@@ -877,6 +958,7 @@ async function handleHealth(env) {
     trackedAccounts: accounts.length,
     savedTweets: tweets,
     translation,
+    lastTranslationFailure,
     ts: new Date().toISOString(),
   });
 }
@@ -902,6 +984,7 @@ export default {
 
     if (path === '/setup') return handleSetup(request, env);
     if (path === '/health') return handleHealth(env);
+    if (path === '/translate') return handleTranslateTest(request, env, url);
 
     if (path === '/api/tweets') {
       if (!dbEnabled(env)) return jsonResponse({ tweets: [], error: 'D1 missing' });
