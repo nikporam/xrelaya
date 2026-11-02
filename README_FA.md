@@ -155,8 +155,17 @@ npm test
 > متغیرهای غیرحساس را در بخش `[vars]` فایل `wrangler.toml` بگذار؛ مقادیر حساس را با `wrangler secret put`.
 > بخش `[ai]` در `wrangler.toml` ترجمه‌ی رایگان **Workers AI** را فعال می‌کند (بدون نیاز به کلید).
 
-**دیدن وضعیت واقعی:** `curl https://<worker>/health` بخش `translation.providers` و `webhook` را برمی‌گرداند و در تلگرام `/status` همین را می‌نویسد.
-اگر ترجمه انجام نشود، `/test nasa` دلیل دقیق هر سرویس را می‌فرستد (مثلاً `google-endpoint: HTTP 429`).
+**دیدن وضعیت واقعی:**
+```bash
+# تست زنده‌ی ترجمه — دقیقاً می‌گوید کدام سرویس چرا شکست خورد
+curl "https://<worker>/translate?key=<SETUP_KEY>"
+
+# وضعیت کلی + آخرین خطای ترجمه
+curl "https://<worker>/health"
+```
+در تلگرام هم `/status` وضعیت هر سرویس و آخرین خطا را نشان می‌دهد و `/test nasa` دلیل دقیق شکست را می‌فرستد.
+
+**کلید در هر متغیری:** اگر کلید Gemini را اشتباهی در `REQUESTY_API_KEY` بگذاری، ربات از روی شکل کلید (`AIza…`) آن را تشخیص می‌دهد و به endpoint درست Gemini می‌فرستد. کلیدهای `sk-…` به OpenAI می‌روند.
 
 ---
 
