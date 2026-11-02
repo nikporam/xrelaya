@@ -31,9 +31,13 @@ import {
 import { createBudget } from '../lib/budget.js';
 import {
   clearTranslationCache,
+  translateDetailed,
   translateText,
   translationCacheSize,
+  translationStatus,
+  workersAiLanguage,
 } from '../lib/translate.js';
+import { validateWebhookSecret } from '../lib/telegram.js';
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
@@ -489,4 +493,122 @@ test('MyMemory is used when the AI provider and Google fail', async () => {
       assert.equal(result, 'سلام');
     }
   );
+});
+
+
+/* ── Workers AI language handling ─────────────────────────────────────── */
+
+test('workersAiLanguage maps ISO codes to the names m2m100 expects', () => {
+  // Sending "en"/"fa" made the model throw, so Workers AI silently fell
+  // through to Google every single time.
+  assert.equal(workersAiLanguage('en'), 'english');
+  assert.equal(workersAiLanguage('fa'), 'persian');
+  assert.equal(workersAiLanguage('EN'), 'english');
+  assert.equal(workersAiLanguage('fa-IR'), 'fa-ir');
+  assert.equal(workersAiLanguage('', 'fallback'), 'fallback');
+  assert.equal(workersAiLanguage(undefined, 'fallback'), 'fallback');
+});
+
+test('Workers AI is called with full language names', async () => {
+  clearTranslationCache();
+  const calls = [];
+  const env = {
+    TRANSLATE_FA: 'true',
+    AI: {
+      run: async (model, params) => {
+        calls.push({ model, params });
+        return { translated_text: 'سلام دنیا' };
+      },
+    },
+  };
+  const result = await translateText(env, 'Hello world', createBudget(20));
+  assert.equal(result, 'سلام دنیا');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.source_lang, 'english');
+  assert.equal(calls[0].params.target_lang, 'persian');
+  assert.equal(calls[0].model, '@cf/meta/m2m100-1.2b');
+});
+
+test('Workers AI failure is reported instead of being swallowed', async () => {
+  clearTranslationCache();
+  const env = {
+    TRANSLATE_FA: 'true',
+    AI: {
+      run: async () => {
+        throw new Error('invalid language code');
+      },
+    },
+  };
+  await withMockFetch(
+    async (url) => {
+      const target = String(url);
+      if (target.includes('translate.googleapis')) return new Response('nope', { status: 429 });
+      return new Response(JSON.stringify({ responseStatus: 429, responseDetails: 'quota' }), { status: 200 });
+    },
+    async () => {
+      const detail = await translateDetailed(env, 'Hello world', createBudget(20));
+      assert.equal(detail.translation, '');
+      const providers = detail.failures.map((failure) => failure.provider);
+      assert.ok(providers.includes('workers-ai'));
+      const workers = detail.failures.find((failure) => failure.provider === 'workers-ai');
+      assert.match(workers.reason, /invalid language code/);
+      assert.ok(providers.includes('google-endpoint'));
+      assert.ok(providers.includes('mymemory'));
+    }
+  );
+});
+
+test('translateDetailed reports which provider produced the translation', async () => {
+  clearTranslationCache();
+  const env = { TRANSLATE_FA: 'true', AI: { run: async () => ({ translated_text: 'ترجمه' }) } };
+  const detail = await translateDetailed(env, 'Something to translate', createBudget(20));
+  assert.equal(detail.translation, 'ترجمه');
+  assert.equal(detail.provider, 'workers-ai');
+  assert.deepEqual(detail.failures, []);
+});
+
+test('translateDetailed explains why translation was skipped', async () => {
+  clearTranslationCache();
+  const off = await translateDetailed({ TRANSLATE_FA: 'false' }, 'Hello', createBudget(20));
+  assert.equal(off.translation, '');
+  assert.match(off.skipped, /TRANSLATE_FA/);
+
+  const emoji = await translateDetailed({ TRANSLATE_FA: 'true' }, '🦁🔥', createBudget(20));
+  assert.equal(emoji.translation, '');
+  assert.match(emoji.skipped, /nothing to translate/);
+});
+
+/* ── translation status reporting ─────────────────────────────────────── */
+
+test('translationStatus reports the real configuration', () => {
+  const none = translationStatus({});
+  assert.equal(none.primary, 'google-endpoint');
+  assert.equal(none.providers.find((p) => p.name === 'ai').enabled, false);
+  assert.equal(none.providers.find((p) => p.name === 'workers-ai').enabled, false);
+
+  const withAi = translationStatus({ GEMINI_API_KEY: 'abc' });
+  assert.equal(withAi.primary, 'ai');
+  // A Gemini key must pick the Gemini model, not the generic default.
+  assert.equal(withAi.providers.find((p) => p.name === 'ai').model, 'gemini-2.0-flash');
+
+  const withWorkersAi = translationStatus({ AI: { run: () => {} } });
+  assert.equal(withWorkersAi.primary, 'workers-ai');
+
+  const placeholder = translationStatus({ GEMINI_API_KEY: 'your_gemini_api_key' });
+  assert.equal(placeholder.primary, 'google-endpoint');
+});
+
+/* ── webhook secret validation ────────────────────────────────────────── */
+
+test('validateWebhookSecret accepts only characters Telegram allows', () => {
+  assert.equal(validateWebhookSecret(''), null);
+  assert.equal(validateWebhookSecret(undefined), null);
+  assert.equal(validateWebhookSecret('xrelaya_wh-2024'), null);
+
+  // These all made setWebhook fail with an opaque 400 before.
+  assert.match(validateWebhookSecret('my secret!'), /whitespace|rejects/);
+  assert.match(validateWebhookSecret('secret!'), /rejects/);
+  assert.match(validateWebhookSecret('secret.token'), /rejects/);
+  assert.match(validateWebhookSecret('محرمانه'), /rejects/);
+  assert.match(validateWebhookSecret('a'.repeat(257)), /256/);
 });

@@ -53,8 +53,9 @@ database_name = "xrelaya-db"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
 # ── Optional: free Workers AI translation (no API key needed) ────────────
-# Uncomment these two lines to enable it. The bot then uses
-# @cf/meta/m2m100-1.2b when no GEMINI/OPENAI/REQUESTY key is configured.
+# Uncomment these two lines to enable it. When no GEMINI/OPENAI/REQUESTY key
+# is configured the bot translates with @cf/meta/m2m100-1.2b instead.
+# Check what is active with: curl <worker>/health  (see "translation.providers")
 # [ai]
 # binding = "AI"
 

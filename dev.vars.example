@@ -18,5 +18,8 @@ TRANSLATE_FA=true
 # Override Nitter mirrors without redeploying (comma separated, {username} placeholder)
 # RSS_MIRRORS=https://nitter.net/{username}/rss,https://xcancel.com/{username}/rss
 
+# Workers AI translation model (used when the [ai] binding is enabled)
+# WORKERS_AI_MODEL=@cf/meta/m2m100-1.2b
+
 # Point at a self-hosted Telegram Bot API server (or a mock) instead of api.telegram.org
 # TELEGRAM_API_BASE=https://api.telegram.org
