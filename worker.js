@@ -823,10 +823,17 @@ async function handleSetup(request, env) {
 async function handleHealth(env) {
   const translation = translationStatus(env);
   const secretError = validateWebhookSecret(env.TELEGRAM_WEBHOOK_SECRET);
+  // Secrets can never be read back, so at least report whether one exists and
+  // how long it is — that is enough to recognise the key you set and matches
+  // the diagnostic /setup already returns for a wrong key.
+  const setupKey = {
+    configured: Boolean(String(env.SETUP_KEY || '').trim()),
+    length: String(env.SETUP_KEY || '').trim().length,
+  };
 
   if (!dbEnabled(env)) {
     return jsonResponse(
-      { ok: false, error: 'D1 binding missing', translation, webhookSecret: secretError || 'ok' },
+      { ok: false, error: 'D1 binding missing', setupKey, translation, webhookSecret: secretError || 'ok' },
       500
     );
   }
@@ -849,6 +856,7 @@ async function handleHealth(env) {
   return jsonResponse({
     ok,
     botToken: Boolean(env.TELEGRAM_BOT_TOKEN),
+    setupKey,
     webhook,
     webhookSecret: secretError || 'ok',
     trackedAccounts: accounts.length,
