@@ -1,0 +1,22 @@
+# Local development only (wrangler dev). Copy to .dev.vars and fill in values.
+# .dev.vars is gitignored; production uses `wrangler secret put`.
+TELEGRAM_BOT_TOKEN=123456:replace-me
+# Optional: protects /setup (/?key=...)
+SETUP_KEY=replace-me
+# Optional but recommended: verifies the X-Telegram-Bot-Api-Secret-Token header
+# TELEGRAM_WEBHOOK_SECRET=replace-me
+
+# Persian translation (optional). Without a key the bot falls back to
+# Google/MyMemory, or to Workers AI when the [ai] binding is enabled.
+TRANSLATE_FA=true
+# GEMINI_API_KEY=
+# OPENAI_API_KEY=
+# REQUESTY_API_KEY=
+# REQUESTY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+# REQUESTY_MODEL=gemini-2.0-flash
+
+# Override Nitter mirrors without redeploying (comma separated, {username} placeholder)
+# RSS_MIRRORS=https://nitter.net/{username}/rss,https://xcancel.com/{username}/rss
+
+# Point at a self-hosted Telegram Bot API server (or a mock) instead of api.telegram.org
+# TELEGRAM_API_BASE=https://api.telegram.org

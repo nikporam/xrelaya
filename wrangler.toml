@@ -1,0 +1,67 @@
+# ── Cloudflare Worker configuration ────────────────────────────────────────
+# Deploy:
+#   npm install
+#   npx wrangler d1 create xrelaya-db          # copy database_id below
+#   npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN
+#   npx wrangler secret put SETUP_KEY
+#   npx wrangler deploy
+#   open https://<worker-url>/setup?key=<SETUP_KEY>
+name = "xrelaya-bot"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+# Import dashboard.html as a string (returned by the "/" route).
+[[rules]]
+type = "Text"
+globs = ["dashboard.html"]
+fallthrough = true
+
+# ── Cron Trigger: The scheduler. Every 5 minutes by default ──────────────
+# Change to "*/1 * * * *" for every minute, or "*/10 * * * *" for every 10.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# ── Non-secret environment variables ─────────────────────────────────────
+[vars]
+TRANSLATE_FA = "true"
+# How many accounts are polled per cron run (round-robin across all accounts).
+ACCOUNTS_PER_CRON = "5"
+# How many new tweets per account are processed in one run.
+MAX_TWEETS_PER_CHECK = "3"
+# Saved tweets repaired per run (database/dashboard only, no Telegram message).
+TRANSLATION_BACKFILL_LIMIT = "5"
+# Free-plan safety: keeps outbound fetch() calls per run under the limit (50).
+SUBREQUEST_BUDGET = "42"
+WEBHOOK_BUDGET = "20"
+# Nitter mirrors to try per account, and how many in parallel.
+FEED_MIRRORS = "6"
+FEED_BATCH = "3"
+MYMEMORY_SOURCE_LANG = "en"
+# Only used by the /status message; the real schedule lives in [triggers] above.
+CHECK_INTERVAL = "300"
+# Optional: public dashboard URL used by the "🌐 داشبورد" button.
+# DASHBOARD_URL = "https://xrelaya-bot.example.workers.dev/"
+
+# ── Cloudflare D1 database ───────────────────────────────────────────────
+# 1. npx wrangler d1 create xrelaya-db
+# 2. Paste the printed database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "xrelaya-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# ── Optional: free Workers AI translation (no API key needed) ────────────
+# Uncomment these two lines to enable it. The bot then uses
+# @cf/meta/m2m100-1.2b when no GEMINI/OPENAI/REQUESTY key is configured.
+# [ai]
+# binding = "AI"
+
+# ── Secrets (never put these in this file) ───────────────────────────────
+# npx wrangler secret put TELEGRAM_BOT_TOKEN   # from @BotFather
+# npx wrangler secret put SETUP_KEY            # protects /setup
+# npx wrangler secret put TELEGRAM_WEBHOOK_SECRET  # optional, recommended
+# npx wrangler secret put GEMINI_API_KEY       # optional, better translation
+# npx wrangler secret put OPENAI_API_KEY       # optional
+# npx wrangler secret put REQUESTY_API_KEY     # optional
