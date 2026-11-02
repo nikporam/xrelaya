@@ -792,15 +792,18 @@ async function handleSetup(request, env) {
     if (secretToken) result.steps.push({ step: 'webhookSecret', ok: true });
   }
 
+  // Always report the webhook state, even when the lookup itself failed —
+  // otherwise a silent bot has no diagnostic at all.
   const info = await getWebhookInfo(env);
-  if (info.ok) {
-    result.webhook = {
-      url: info.result?.url || '',
-      pending_updates: info.result?.pending_update_count ?? 0,
-      last_error: info.result?.last_error_message || null,
-      last_error_at: info.result?.last_error_date || null,
-    };
-  }
+  result.webhook = info.ok
+    ? {
+        configured: Boolean(info.result?.url),
+        url: info.result?.url || '',
+        pending_updates: info.result?.pending_update_count ?? 0,
+        last_error: info.result?.last_error_message || null,
+        last_error_at: info.result?.last_error_date || null,
+      }
+    : { configured: false, error: info.description || 'getWebhookInfo failed' };
 
   const translation = translationStatus(env);
   result.translation = {
@@ -814,7 +817,19 @@ async function handleSetup(request, env) {
 
   result.dashboard = `${origin}/`;
   result.ok = result.steps.every((step) => step.ok !== false);
-  if (!result.ok) {
+
+  if (result.ok) {
+    // Save the operator a trip to the README.
+    result.next_steps = [
+      `Open Telegram and send /start to @${me.result?.username || 'your bot'}`,
+      'Send /add <username> to follow an account (e.g. /add nasa)',
+      translation.primary === 'google-endpoint'
+        ? 'Translation quality: add GEMINI_API_KEY or enable the [ai] binding, then re-check /status'
+        : `Translation is using ${translation.primary}`,
+      'First cron run only records a baseline; new tweets arrive within ~10 minutes',
+      'Check /health any time to see the webhook and translation state',
+    ];
+  } else {
     result.hint = 'Check the "error" field of each failing step. If setWebhook failed with "secret token contains unallowed characters", set TELEGRAM_WEBHOOK_SECRET to only A-Z a-z 0-9 _ - (or delete it).';
   }
   return jsonResponse(result, result.ok ? 200 : 500);
