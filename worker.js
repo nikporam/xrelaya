@@ -352,6 +352,15 @@ function providerLabel(provider) {
   return '✅ در دسترس';
 }
 
+// Workers AI has two very different backends (chat model vs m2m100) and the
+// answer to "which one is translating?" must never be a guess.
+function workersAiLabel(provider) {
+  if (!provider?.enabled) return '❌ تنظیم نشده ([ai] در wrangler.toml)';
+  const model = String(provider.model || '').replace(/^@cf\//, '');
+  const mode = provider.mode === 'translate' ? 'm2m100' : 'مدل چت';
+  return `${providerLabel(provider)} <i>(${escapeHtml(mode)}: ${escapeHtml(model)})</i>`;
+}
+
 async function replyStatus(env, chatId, budget) {
   if (!dbEnabled(env)) {
     await reply(env, chatId, '❌ دیتابیس D1 متصل نیست.');
@@ -370,7 +379,7 @@ async function replyStatus(env, chatId, budget) {
     ? primary?.name === 'ai'
       ? `✅ ${escapeHtml(primary.model || 'AI')}`
       : primary?.name === 'workers-ai'
-        ? `✅ Workers AI (${escapeHtml(primary.model || '')})`
+        ? `✅ Cloudflare Workers AI (<i>${escapeHtml(String(primary.model || '').replace(/^@cf\//, ''))}</i>)`
         : '⚠️ فقط fallback ها (رایگان ولی بی‌ثبات)'
     : '❌ خاموش (TRANSLATE_FA=false)';
 
@@ -379,7 +388,7 @@ async function replyStatus(env, chatId, budget) {
     '',
     `🤖 <b>ترجمه:</b> ${primaryLine}`,
     `  • AI key: ${providerLabel(byName.ai)}`,
-    `  • Workers AI: ${providerLabel(byName['workers-ai'])}`,
+    `  • Workers AI: ${workersAiLabel(byName['workers-ai'])}`,
     `  • Google: ${providerLabel(byName['google-endpoint'])} <i>(fallback)</i>`,
     `  • MyMemory: ${providerLabel(byName.mymemory)} <i>(fallback)</i>`,
     `💾 <b>دیتابیس:</b> ✅ Cloudflare D1`,
@@ -393,7 +402,13 @@ async function replyStatus(env, chatId, budget) {
     lines.push(`  ↳ کلید: ${escapeHtml(status.ai.keySource || 'نامشخص')} • مدل: ${escapeHtml(status.ai.model || '')}`);
   }
   if (!byName.ai.enabled && !byName['workers-ai'].enabled) {
-    lines.push('', '💡 برای ترجمه باکیفیت: /setup یا یک GEMINI_API_KEY ست کن،', '   یا در wrangler.toml بخش [ai] را فعال کن.');
+    lines.push(
+      '',
+      '💡 رایگان‌ترین راه: در wrangler.toml این دو خط را اضافه کن:',
+      '<code>[ai]</code>',
+      '<code>binding = "AI"</code>',
+      'بعد <code>npx wrangler deploy</code> — بدون کلید و بدون هزینه.'
+    );
   }
 
   // Last real failure, so "why is there no Persian text?" has an answer.
@@ -906,7 +921,10 @@ async function handleTranslateTest(request, env, url) {
       provider: detail.provider || null,
       skipped: detail.skipped || null,
       failures: detail.failures,
-      config: status.ai || { keySource: null, provider: null, model: null },
+      config: {
+        ai: status.ai || { keySource: null, provider: null, model: null },
+        workersAi: status.providers.find((p) => p.name === 'workers-ai') || { enabled: false },
+      },
       hint: ok
         ? 'Translation works. New tweets will include the Persian text.'
         : 'No provider produced a translation. Fix the first failure listed above, or set GEMINI_API_KEY / enable the [ai] binding.',

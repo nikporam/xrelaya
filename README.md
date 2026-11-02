@@ -215,11 +215,20 @@ xrelaya/
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
 | `SETUP_KEY` | empty | Protects the `/setup` endpoint |
 | `TELEGRAM_WEBHOOK_SECRET` | empty | Validates Telegram's webhook header; only `A-Z a-z 0-9 _ -` |
-| `WORKERS_AI_MODEL` | `@cf/meta/m2m100-1.2b` | Workers AI translation model (`nllb-200-distilled-600M` also works) |
+| `WORKERS_AI_MODE` | `auto` | Workers AI backend: `auto` (chat model, then m2m100), `chat`, `translate` |
+| `WORKERS_AI_CHAT_MODEL` | `@cf/zai-org/glm-4.7-flash` | Chat model used for translation (`@cf/google/gemma-4-26b-a4b-it` reads Persian better, costs more) |
+| `WORKERS_AI_MODEL` | `@cf/meta/m2m100-1.2b` | Workers AI seq2seq backup (`nllb-200-distilled-600M` also works) |
 | `DASHBOARD_URL` | Worker origin | Dashboard URL used by the “🌐 داشبورد” button |
 
 Non-secret values live in the `[vars]` block of `wrangler.toml`; secrets go through `wrangler secret put`.
-Uncommenting the `[ai]` block enables free **Workers AI** translation (no API key needed).
+
+### Free translation without any API key
+
+The `[ai]` binding in `wrangler.toml` is on by default, so the bot translates on
+Cloudflare itself: a chat model (`@cf/zai-org/glm-4.7-flash`) writes the Persian,
+and `m2m100` stays as a cheap backup if the chat model is unavailable. No key, no
+card, and the calls do not consume the 50-subrequest budget because they never
+leave the Worker. `/status` prints which backend is live and with which model.
 
 ---
 
