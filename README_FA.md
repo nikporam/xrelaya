@@ -87,7 +87,58 @@ python twitter_telegram_bot.py
 
 ---
 
-### ۵. هاست ۲۴ ساعته رایگان
+### ۵. اجرای رایگان روی Cloudflare Workers (بدون سرور)
+
+همین ربات + داشبورد + دیتابیس، بدون هیچ سرور و VPS، روی **پلن رایگان Cloudflare** هم اجرا می‌شود.
+فایل‌های مربوطه: `worker.js` (منطق ربات) و پوشه `lib/` (فیلتر ریتوییت، ترجمه، RSS، D1، تلگرام) و `dashboard.html` (داشبورد).
+
+| نسخه پایتون (Railway/VPS) | نسخه Cloudflare |
+|---|---|
+| `python-telegram-bot` + Long Polling | **Webhook** تلگرام (`POST /telegram`) |
+| `job_queue` هر ۵ دقیقه | **Cron Trigger** کلودفلر |
+| PostgreSQL + `psycopg2` | **Cloudflare D1** (SQLite) |
+| FastAPI + Jinja | خود Worker + `dashboard.html` |
+
+**پیش‌نیاز:** Node.js 20+ و یک اکانت Cloudflare (پلن رایگان کافی است).
+
+```bash
+npm install
+
+# ۱) ساخت دیتابیس D1 — مقدار database_id خروجی را در wrangler.toml بگذار
+npx wrangler d1 create xrelaya-db
+
+# ۲) ساخت جدول‌ها
+npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
+
+# ۳) توکن‌ها و کلیدهای امنیتی
+npx wrangler secret put TELEGRAM_BOT_TOKEN     # از BotFather
+npx wrangler secret put SETUP_KEY              # محافظ آدرس /setup
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET  # اختیاری ولی توصیه می‌شود
+npx wrangler secret put GEMINI_API_KEY         # اختیاری، ترجمه باکیفیت‌تر
+
+# ۴) انتشار
+npx wrangler deploy
+```
+
+بعد از deploy فقط یک‌بار این آدرس را باز کن تا وب‌هوک تلگرام و منوی دستورات ثبت شود:
+
+```
+https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
+```
+
+خروجی JSON نشان می‌دهد هر مرحله (`database`, `getMe`, `setMyCommands`, `setWebhook`) موفق بوده یا نه.
+داشبورد هم روی همان دامنه (`/`) بالا می‌آید.
+
+**نکته‌های مهم Cloudflare:**
+
+- **کرون هر ۵ دقیقه** اجرا می‌شود (`triggers.crons` در `wrangler.toml`) و در هر اجرا به‌صورت گردشی (`ACCOUNTS_PER_CRON`) چند اکانت را چک می‌کند؛ پس با هر تعداد اکانت، همه‌شان به‌ترتیب بررسی می‌شوند.
+- **سقف ۵۰ درخواست خروجی در هر اجرا (پلن رایگان):** ربات خودش بودجه‌ی `SUBREQUEST_BUDGET` را رعایت می‌کند و اگر کم بیاید، بقیه توییت‌ها را به اجرای بعدی موکول می‌کند (هیچ توییتی از دست نمی‌رود و ارسال تکراری هم نداریم).
+- **ترجمه رایگان بدون API Key:** اگر در `wrangler.toml` بخش `[ai]` را از کامنت خارج کنی، ترجمه با مدل رایگان Workers AI (`@cf/meta/m2m100-1.2b`) انجام می‌شود؛ در غیر این صورت همان Google/MyMemory fallback کار می‌کند.
+- **تغییر میرورهای Nitter بدون deploy:** متغیر `RSS_MIRRORS` را با لیست دلخواه (جدا شده با کاما و حاوی `{username}`) ست کن.
+- **اجرای لوکال:** `cp dev.vars.example .dev.vars` و بعد `npx wrangler dev`.
+- **تست منطق بدون Cloudflare:** `npm test` (تست‌های فیلتر ریتوییت، ساخت کارت پیام، پارس RSS و ترجمه).
+
+### ۶. هاست ۲۴ ساعته رایگان
 
 برای اینکه همیشه روشن باشه، روی یکی از اینها رایگان دیپلوی کن:
 
@@ -114,6 +165,13 @@ python twitter_telegram_bot.py
 | `MYMEMORY_SOURCE_LANG` | `en` | زبان مبدأ برای fallback غیرگوگلی ترجمه |
 | `MYMEMORY_EMAIL` | خالی | ایمیل اختیاری برای سقف رایگان بالاتر MyMemory |
 | `LOG_LEVEL` | `INFO` | روی `DEBUG` بگذار تا دلیل نگه‌داشتن یا حذف هر آیتم فید لاگ شود |
+| `ACCOUNTS_PER_CRON` | `5` | (Cloudflare) تعداد اکانتی که در هر اجرای کرون بررسی می‌شود |
+| `MAX_TWEETS_PER_CHECK` | `3` | (Cloudflare) تعداد توییت جدید پردازش‌شده برای هر اکانت در هر اجرا |
+| `SUBREQUEST_BUDGET` | `42` | (Cloudflare) سقف درخواست خروجی در هر اجرا؛ کمتر از سقف ۵۰ پلن رایگان |
+| `RSS_MIRRORS` | خالی | (Cloudflare) لیست میرورهای Nitter جدا شده با کاما، با پلیس‌هولدر `{username}` |
+| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | (Cloudflare) تعداد میرورهای هر اکانت و تعداد درخواست موازی |
+| `SETUP_KEY` | خالی | (Cloudflare) کلید محافظ آدرس `/setup` |
+| `TELEGRAM_WEBHOOK_SECRET` | خالی | (Cloudflare) توکن تأیید هدر تلگرام برای وبهوک |
 
 ---
 
@@ -136,12 +194,26 @@ python twitter_telegram_bot.py
 
 ```
 twitter-telegram-bot/
-├── twitter_telegram_bot.py   # ربات اصلی + وب سرور
-├── database.py               # مدیریت PostgreSQL
+├── twitter_telegram_bot.py   # ربات اصلی + وب سرور (نسخه پایتون)
+├── database.py               # مدیریت PostgreSQL (نسخه پایتون)
 ├── web_server.py             # سرور وب (اختیاری)
-├── templates/index.html      # قالب داشبورد وب
+├── templates/index.html      # قالب داشبورد وب (نسخه پایتون)
 ├── sw.js                     # Service Worker
 ├── manifest.json             # PWA Manifest
 ├── requirements.txt          # وابستگی‌ها
-└── Procfile                  # فایل هاست
+├── Procfile                  # فایل هاست
+│
+├── worker.js                 # ⚡ ربات کامل برای Cloudflare Workers
+├── dashboard.html            # داشبورد نسخه Cloudflare
+├── lib/                      # ماژول‌های Worker
+│   ├── rss.js                #   پارس فید + فیلتر ریتوییت
+│   ├── text.js               #   ساخت کارت پیام/ترجمه متن
+│   ├── translate.js          #   ترجمه با AI/Google/MyMemory/Workers AI
+│   ├── db.js                 #   لایه Cloudflare D1
+│   ├── telegram.js           #   کلاینت Bot API
+│   └── budget.js             #   محدودکننده درخواست‌های خروجی
+├── schema.sql                # جدول‌های D1
+├── wrangler.toml             # تنظیمات Cloudflare
+├── package.json              # اسکریپت‌های deploy/test
+└── dev.vars.example          # نمونه متغیرهای اجرای لوکال
 ```

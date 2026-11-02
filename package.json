@@ -1,0 +1,21 @@
+{
+  "name": "xrelaya-cloudflare-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Twitter/X to Telegram Bot + Live PWA Dashboard on Cloudflare Workers & D1",
+  "main": "worker.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create xrelaya-db",
+    "db:init": "wrangler d1 execute xrelaya-db --remote --file=./schema.sql",
+    "test": "node --test test/worker_logic.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.156.2"
+  }
+}

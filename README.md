@@ -120,6 +120,56 @@ Searches saved tweets and shares them inline.
 
 ---
 
+## ⚡ Deploy to Cloudflare Workers (free, no server)
+
+The whole bot also runs on Cloudflare's free plan — no VPS, no long polling, no Postgres.
+Files: `worker.js` + `lib/` (RSS/filter, translation, D1, Telegram) + `dashboard.html`.
+
+| Python version (Railway/VPS) | Cloudflare version |
+|---|---|
+| `python-telegram-bot` long polling | Telegram **webhook** (`POST /telegram`) |
+| `job_queue` every 5 minutes | **Cron Trigger** |
+| PostgreSQL + `psycopg2` | **Cloudflare D1** (SQLite) |
+| FastAPI + Jinja | the Worker itself + `dashboard.html` |
+
+```bash
+npm install
+
+# 1) Create the D1 database — put the printed database_id into wrangler.toml
+npx wrangler d1 create xrelaya-db
+
+# 2) Create the tables
+npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
+
+# 3) Secrets
+npx wrangler secret put TELEGRAM_BOT_TOKEN      # from @BotFather
+npx wrangler secret put SETUP_KEY               # protects /setup
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET # optional, recommended
+npx wrangler secret put GEMINI_API_KEY          # optional, better translation
+
+# 4) Deploy
+npx wrangler deploy
+```
+
+Then open this once to register the webhook and the bot menu:
+
+```
+https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
+```
+
+It returns JSON showing whether `database`, `getMe`, `setMyCommands` and `setWebhook` succeeded.
+The dashboard is served at `/` on the same domain.
+
+**Cloudflare notes**
+
+- The cron runs every 5 minutes and checks `ACCOUNTS_PER_CRON` accounts per run, round-robin, so any number of tracked accounts keeps working.
+- The free plan allows 50 outbound `fetch()` calls per invocation. The bot budgets itself (`SUBREQUEST_BUDGET`, default 42) and postpones the rest to the next run — no tweet is lost and nothing is sent twice.
+- **Free translation without an API key:** uncomment the `[ai]` block in `wrangler.toml` and the bot uses Workers AI (`@cf/meta/m2m100-1.2b`); otherwise it falls back to Google/MyMemory.
+- Change Nitter mirrors without redeploying: set `RSS_MIRRORS` (comma separated, `{username}` placeholder).
+- Local run: `cp dev.vars.example .dev.vars` then `npx wrangler dev`. Tests: `npm test`.
+
+---
+
 ## 🌐 Deploy to Railway
 
 1. Push to GitHub
@@ -146,16 +196,31 @@ Searches saved tweets and shares them inline.
 
 ```
 twitter-telegram-bot/
-├── twitter_telegram_bot.py   # Main bot + web server
-├── database.py               # PostgreSQL manager
+├── twitter_telegram_bot.py   # Main bot + web server (Python version)
+├── database.py               # PostgreSQL manager (Python version)
 ├── templates/
-│   └── index.html            # Dashboard UI (PWA)
+│   └── index.html            # Dashboard UI (PWA, Python version)
 ├── sw.js                     # Service Worker
 ├── manifest.json             # PWA manifest
 ├── requirements.txt          # Dependencies
 ├── Procfile                  # Railway config
 ├── README_FA.md              # 🇮🇷 Persian docs
-└── README.md                 # 🇬🇧 English docs
+├── README.md                 # 🇬🇧 English docs
+│
+├── worker.js                 # ⚡ Full bot for Cloudflare Workers
+├── dashboard.html            # Cloudflare dashboard
+├── lib/
+│   ├── rss.js                #   feed parser + retweet filter
+│   ├── text.js               #   message cards / text helpers
+│   ├── translate.js          #   AI / Google / MyMemory / Workers AI
+│   ├── db.js                 #   Cloudflare D1 layer
+│   ├── telegram.js           #   Bot API client
+│   └── budget.js             #   subrequest budget guard
+├── schema.sql                # D1 tables
+├── wrangler.toml             # Cloudflare config
+├── package.json              # deploy/test scripts
+├── test/worker_logic.test.mjs
+└── dev.vars.example          # local dev variables
 ```
 
 ---
@@ -177,6 +242,13 @@ twitter-telegram-bot/
 | `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback translator |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
 | `LOG_LEVEL` | `INFO` | Set to `DEBUG` to log why each feed entry was kept or skipped |
+| `ACCOUNTS_PER_CRON` | `5` | (Cloudflare) accounts checked per cron run |
+| `MAX_TWEETS_PER_CHECK` | `3` | (Cloudflare) new tweets processed per account per run |
+| `SUBREQUEST_BUDGET` | `42` | (Cloudflare) outbound calls per run; keep below the free-plan limit of 50 |
+| `RSS_MIRRORS` | empty | (Cloudflare) comma-separated Nitter mirrors with a `{username}` placeholder |
+| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | (Cloudflare) mirrors per account and parallel requests |
+| `SETUP_KEY` | empty | (Cloudflare) protects the `/setup` endpoint |
+| `TELEGRAM_WEBHOOK_SECRET` | empty | (Cloudflare) validates Telegram's webhook header |
 
 ---
 
