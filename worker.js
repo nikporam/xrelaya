@@ -25,7 +25,7 @@ import {
   isRetweet,
   isValidTwitter,
 } from './lib/rss.js';
-import { translateText } from './lib/translate.js';
+import { translateDetailed, translateText, translationStatus } from './lib/translate.js';
 import {
   addSubscription,
   cleanup,
@@ -55,10 +55,12 @@ import {
   deleteWebhook,
   downloadImage,
   getMe,
+  getWebhookInfo,
   sendMessage,
   sendPhoto,
   setMyCommands,
   setWebhook,
+  validateWebhookSecret,
 } from './lib/telegram.js';
 
 /* ── Config ───────────────────────────────────────────────────────────── */
@@ -90,12 +92,17 @@ export async function buildContent(env, username, entry, budget = null) {
   const tid = extractId(entry);
   if (!tid || isRetweet(entry, username)) return null;
   const title = extractTweetText(entry);
-  const translation = await translateText(env, title, budget);
+  // translateDetailed keeps the per-provider failure reasons, which /test
+  // surfaces so a broken translation service is never a silent mystery.
+  const detail = await translateDetailed(env, title, budget);
   return {
     tid,
     username,
     title,
-    translation,
+    translation: detail.translation,
+    translationProvider: detail.provider,
+    translationFailures: detail.failures,
+    translationSkipped: detail.skipped,
     img_url: extractImageUrl(entry),
     link: `https://x.com/i/status/${tid}`,
   };
@@ -320,6 +327,13 @@ async function replyList(env, chatId, budget) {
   await reply(env, chatId, `📋 لیست شما (${lines.length}):\n\n${lines.join('\n')}`, { budget });
 }
 
+// "enabled" means configured, not "known reachable" — the fallback services
+// are always listed, and only a real /test proves they answer.
+function providerLabel(provider) {
+  if (!provider.enabled) return '❌ تنظیم نشده';
+  return '✅ در دسترس';
+}
+
 async function replyStatus(env, chatId, budget) {
   if (!dbEnabled(env)) {
     await reply(env, chatId, '❌ دیتابیس D1 متصل نیست.');
@@ -329,15 +343,27 @@ async function replyStatus(env, chatId, budget) {
   const tracked = await getAllTracked(env);
   const tweetCount = await countTweets(env);
   const missing = await countMissingTranslations(env);
-  const hasAi = Boolean(
-    String(env.REQUESTY_API_KEY || env.GEMINI_API_KEY || env.OPENAI_API_KEY || '').trim()
-  );
-  const translation = hasAi ? '✅ AI + Google/MyMemory fallback' : '⚠️ Google/MyMemory fallback';
+
+  // Report what is actually configured instead of guessing from one key.
+  const status = translationStatus(env);
+  const byName = Object.fromEntries(status.providers.map((p) => [p.name, p]));
+  const primary = byName[status.primary];
+  const primaryLine = status.enabled
+    ? primary?.name === 'ai'
+      ? `✅ ${escapeHtml(primary.model || 'AI')}`
+      : primary?.name === 'workers-ai'
+        ? `✅ Workers AI (${escapeHtml(primary.model || '')})`
+        : '⚠️ فقط fallback ها (رایگان ولی بی‌ثبات)'
+    : '❌ خاموش (TRANSLATE_FA=false)';
 
   const lines = [
     '📊 <b>وضعیت ربات</b>',
     '',
-    `🤖 <b>ترجمه:</b> ${translation}`,
+    `🤖 <b>ترجمه:</b> ${primaryLine}`,
+    `  • AI key: ${providerLabel(byName.ai)}`,
+    `  • Workers AI: ${providerLabel(byName['workers-ai'])}`,
+    `  • Google: ${providerLabel(byName['google-endpoint'])} <i>(fallback)</i>`,
+    `  • MyMemory: ${providerLabel(byName.mymemory)} <i>(fallback)</i>`,
     `💾 <b>دیتابیس:</b> ✅ Cloudflare D1`,
     `📝 <b>توییت‌های ذخیره شده:</b> ${tweetCount}`,
     `🦁 <b>بدون ترجمه:</b> ${missing}`,
@@ -345,7 +371,9 @@ async function replyStatus(env, chatId, budget) {
     `🌐 <b>اکانت‌های کل:</b> ${tracked.length}`,
     `⏱ <b>بررسی هر:</b> ${env.CHECK_INTERVAL || 300} ثانیه`,
   ];
-  if (env.REQUESTY_MODEL) lines.push(`🧠 <b>مدل:</b> ${escapeHtml(env.REQUESTY_MODEL)}`);
+  if (!byName.ai.enabled && !byName['workers-ai'].enabled) {
+    lines.push('', '💡 برای ترجمه باکیفیت: /setup یا یک GEMINI_API_KEY ست کن،', '   یا در wrangler.toml بخش [ai] را فعال کن.');
+  }
   await reply(env, chatId, lines.join('\n'), { budget });
 }
 
@@ -412,7 +440,29 @@ async function runTest(env, chatId, username, budget) {
     return;
   }
   const content = await buildContent(env, username, entries[0], budget);
-  if (content) await deliver(env, content, [String(chatId)], budget, true);
+  if (!content) {
+    await reply(env, chatId, '⚠️ آیتم اول فید ریتوییت بود یا شناسه نداشت.', { budget });
+    return;
+  }
+  await deliver(env, content, [String(chatId)], budget, true);
+
+  // Translation problems are reported explicitly, otherwise a silent
+  // fallback looks like "translation is off".
+  if (!content.translation) {
+    const reason = content.translationSkipped
+      ? `دلیل: ${content.translationSkipped}`
+      : content.translationFailures?.length
+        ? content.translationFailures
+            .map((failure) => `• ${failure.provider}: ${failure.reason}`)
+            .join('\n')
+        : 'دلیل نامشخص';
+    await reply(
+      env,
+      chatId,
+      `🦁 <b>ترجمه انجام نشد</b>\n${reason}\n\n💡 /status را ببین یا GEMINI_API_KEY ست کن.`,
+      { budget }
+    );
+  }
 }
 
 /* ── Telegram updates ─────────────────────────────────────────────────── */
@@ -669,8 +719,12 @@ async function handleWebhook(request, env, ctx) {
 
 async function handleSetup(request, env) {
   const url = new URL(request.url);
-  const key = url.searchParams.get('key') || request.headers.get('X-Setup-Key') || '';
-  if (!env.SETUP_KEY) {
+  // Secrets are typed by hand, so a stray space or newline is the single most
+  // common reason /setup "rejects" a key that looks identical.
+  const provided = String(url.searchParams.get('key') || request.headers.get('X-Setup-Key') || '').trim();
+  const expected = String(env.SETUP_KEY || '').trim();
+
+  if (!expected) {
     return jsonResponse(
       {
         ok: false,
@@ -680,8 +734,17 @@ async function handleSetup(request, env) {
       400
     );
   }
-  if (key !== String(env.SETUP_KEY)) {
-    return jsonResponse({ ok: false, error: 'invalid setup key' }, 403);
+
+  if (provided !== expected) {
+    const diagnosis = { ok: false, error: 'invalid setup key' };
+    if (!provided) diagnosis.hint = 'Add ?key=<SETUP_KEY> to the URL or send an X-Setup-Key header.';
+    else if (provided.toLowerCase() === expected.toLowerCase()) diagnosis.hint = 'The key matches except for letter case.';
+    else if (provided.length !== expected.length) diagnosis.hint = `Key length differs (sent ${provided.length}, stored ${expected.length}).`;
+    else diagnosis.hint = 'The key differs from the stored secret. Set a new one with: npx wrangler secret put SETUP_KEY';
+    if (expected !== String(env.SETUP_KEY)) {
+      diagnosis.hint += ' (Your stored SETUP_KEY has leading/trailing whitespace — it is compared trimmed.)';
+    }
+    return jsonResponse(diagnosis, 403);
   }
 
   const result = { ok: true, steps: [] };
@@ -689,38 +752,108 @@ async function handleSetup(request, env) {
   result.steps.push({ step: 'database', ok: schemaOk });
 
   const me = await getMe(env);
-  result.steps.push({ step: 'getMe', ok: Boolean(me.ok), username: me.result?.username });
+  result.steps.push({
+    step: 'getMe',
+    ok: Boolean(me.ok),
+    username: me.result?.username,
+    ...(me.ok ? {} : { error: me.description, error_code: me.error_code }),
+  });
 
   const commands = await setMyCommands(env, BOT_COMMANDS);
-  result.steps.push({ step: 'setMyCommands', ok: Boolean(commands.ok) });
+  result.steps.push({
+    step: 'setMyCommands',
+    ok: Boolean(commands.ok),
+    ...(commands.ok ? {} : { error: commands.description, error_code: commands.error_code }),
+  });
 
   const origin = url.origin;
-  const webhook = await setWebhook(env, `${origin}/telegram`, env.TELEGRAM_WEBHOOK_SECRET);
-  result.steps.push({ step: 'setWebhook', ok: Boolean(webhook.ok), url: `${origin}/telegram` });
+  const secretToken = String(env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+  const secretError = validateWebhookSecret(secretToken);
 
-  if (env.TELEGRAM_WEBHOOK_SECRET) {
-    result.steps.push({ step: 'webhookSecret', ok: true });
+  if (secretError) {
+    // Rejected locally with a readable reason instead of Telegram's opaque 400.
+    result.steps.push({ step: 'webhookSecret', ok: false, error: secretError });
+    const plain = await setWebhook(env, `${origin}/telegram`, '');
+    result.steps.push({
+      step: 'setWebhook',
+      ok: Boolean(plain.ok),
+      url: `${origin}/telegram`,
+      note: 'Registered WITHOUT secret_token. The Worker still expects a secret, so requests will be rejected until it is fixed or removed.',
+      ...(plain.ok ? {} : { error: plain.description, error_code: plain.error_code }),
+    });
+  } else {
+    const webhook = await setWebhook(env, `${origin}/telegram`, secretToken);
+    result.steps.push({
+      step: 'setWebhook',
+      ok: Boolean(webhook.ok),
+      url: `${origin}/telegram`,
+      ...(webhook.ok ? {} : { error: webhook.description, error_code: webhook.error_code }),
+    });
+    if (secretToken) result.steps.push({ step: 'webhookSecret', ok: true });
   }
+
+  const info = await getWebhookInfo(env);
+  if (info.ok) {
+    result.webhook = {
+      url: info.result?.url || '',
+      pending_updates: info.result?.pending_update_count ?? 0,
+      last_error: info.result?.last_error_message || null,
+      last_error_at: info.result?.last_error_date || null,
+    };
+  }
+
+  const translation = translationStatus(env);
+  result.translation = {
+    enabled: translation.enabled,
+    primary: translation.primary,
+    note:
+      translation.primary === 'google-endpoint'
+        ? 'No AI key and no Workers AI binding: translation will use the free Google/MyMemory fallbacks.'
+        : undefined,
+  };
+
   result.dashboard = `${origin}/`;
   result.ok = result.steps.every((step) => step.ok !== false);
+  if (!result.ok) {
+    result.hint = 'Check the "error" field of each failing step. If setWebhook failed with "secret token contains unallowed characters", set TELEGRAM_WEBHOOK_SECRET to only A-Z a-z 0-9 _ - (or delete it).';
+  }
   return jsonResponse(result, result.ok ? 200 : 500);
 }
 
 async function handleHealth(env) {
+  const translation = translationStatus(env);
+  const secretError = validateWebhookSecret(env.TELEGRAM_WEBHOOK_SECRET);
+
   if (!dbEnabled(env)) {
-    return jsonResponse({ ok: false, error: 'D1 binding missing' }, 500);
+    return jsonResponse(
+      { ok: false, error: 'D1 binding missing', translation, webhookSecret: secretError || 'ok' },
+      500
+    );
   }
   await ensureSchema(env);
   const [accounts, tweets] = await Promise.all([getAllTracked(env), countTweets(env)]);
+
+  // Tell the truth about the delivery path: a webhook that was never
+  // registered is the single most common reason the bot stays silent.
+  const info = env.TELEGRAM_BOT_TOKEN ? await getWebhookInfo(env) : { ok: false };
+  const webhook = info.ok
+    ? {
+        configured: Boolean(info.result?.url),
+        url: info.result?.url || '',
+        pending_updates: info.result?.pending_update_count ?? 0,
+        last_error: info.result?.last_error_message || null,
+      }
+    : { configured: false, error: info.description || 'getWebhookInfo failed' };
+
+  const ok = Boolean(env.TELEGRAM_BOT_TOKEN) && webhook.configured && !secretError;
   return jsonResponse({
-    ok: true,
+    ok,
     botToken: Boolean(env.TELEGRAM_BOT_TOKEN),
+    webhook,
+    webhookSecret: secretError || 'ok',
     trackedAccounts: accounts.length,
     savedTweets: tweets,
-    translation: Boolean(
-      String(env.REQUESTY_API_KEY || env.GEMINI_API_KEY || env.OPENAI_API_KEY || '').trim()
-    ),
-    workersAi: Boolean(env.AI),
+    translation,
     ts: new Date().toISOString(),
   });
 }
@@ -787,8 +920,8 @@ export default {
 
     // Convenience: /set-webhook /del-webhook from the browser, still key-gated.
     if (path === '/del-webhook') {
-      const key = url.searchParams.get('key') || '';
-      if (!env.SETUP_KEY || key !== String(env.SETUP_KEY)) {
+      const key = String(url.searchParams.get('key') || request.headers.get('X-Setup-Key') || '').trim();
+      if (!env.SETUP_KEY || key !== String(env.SETUP_KEY).trim()) {
         return jsonResponse({ ok: false, error: 'invalid setup key' }, 403);
       }
       return jsonResponse(await deleteWebhook(env));

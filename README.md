@@ -214,7 +214,8 @@ xrelaya/
 | `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
 | `SETUP_KEY` | empty | Protects the `/setup` endpoint |
-| `TELEGRAM_WEBHOOK_SECRET` | empty | Validates Telegram's webhook header |
+| `TELEGRAM_WEBHOOK_SECRET` | empty | Validates Telegram's webhook header; only `A-Z a-z 0-9 _ -` |
+| `WORKERS_AI_MODEL` | `@cf/meta/m2m100-1.2b` | Workers AI translation model (`nllb-200-distilled-600M` also works) |
 | `DASHBOARD_URL` | Worker origin | Dashboard URL used by the “🌐 داشبورد” button |
 
 Non-secret values live in the `[vars]` block of `wrangler.toml`; secrets go through `wrangler secret put`.
@@ -229,6 +230,10 @@ Uncommenting the `[ai]` block enables free **Workers AI** translation (no API ke
 - ✅ Retweets/reposts are filtered out; a display name (e.g. `RippleX`) is never mistaken for a handle
 - ✅ One Telegram card per tweet: long captions are auto-truncated, never split
 - ✅ Translation falls back through Workers AI → Google → MyMemory, and empty results are never cached
+- ✅ Workers AI receives full language names (`english`/`persian`); the short ISO codes it rejects are never sent
+- ✅ `/health` reports `translation.providers` and the real `webhook` state, and `/test <user>` explains each translation failure
+- ✅ `SETUP_KEY` and `TELEGRAM_WEBHOOK_SECRET` are compared trimmed, so a stray space no longer breaks setup
+- ✅ `secret_token` is validated locally before Telegram sees it, with a readable reason instead of an opaque 400
 - ✅ Saved tweets with empty translations are backfilled for the dashboard (no duplicate Telegram messages)
 - ✅ Tweet media is downloaded locally before upload, so Telegram never has to reach `pbs.twimg.com`
 - ✅ Old data is cleaned daily (30 days of `sent_ids`, newest 300 tweets kept)
