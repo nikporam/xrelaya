@@ -5,17 +5,16 @@
 <h1 align="center">🐦 Twitter/X → Telegram Bot</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
+  <img src="https://img.shields.io/badge/Cloudflare-D1-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare D1">
   <img src="https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?logo=telegram&logoColor=white" alt="Telegram">
-  <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL">
-  <img src="https://img.shields.io/badge/Gemini-AI-8B5CF6?logo=google&logoColor=white" alt="Gemini AI">
+  <img src="https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?logo=javascript&logoColor=black" alt="JavaScript">
 </p>
 
 <p align="center">
-  <b>Forward tweets to Telegram — no paid API needed.</b><br>
-  Uses RSS feeds. Supports AI-powered Persian translation.<br>
-  Includes a live web dashboard + PWA.
+  <b>Forward tweets to Telegram — no paid API, no server, no database to host.</b><br>
+  RSS based, with AI-powered Persian translation.<br>
+  Runs entirely on Cloudflare's free plan: Workers + D1 + Cron.
 </p>
 
 ---
@@ -25,23 +24,22 @@
 | Feature | Description |
 |---------|-------------|
 | 🔄 **Auto Forward** | Tweets delivered to Telegram automatically |
-| 🦁 **AI Translation** | Gemini / Google Translate to Persian |
+| 🦁 **AI Translation** | Gemini / OpenAI / Workers AI, with Google + MyMemory fallback |
 | 🚫 **Retweet Filter** | Skips retweets/reposts, without misreading display names as handles |
-| 🖼️ **Media Support** | Photos included with tweets |
-| 📊 **Live Dashboard** | Web UI to view all tweets |
-| 🔍 **Inline Search** | Search tweets from any chat |
+| 🖼️ **Media Support** | Photos downloaded and uploaded with the tweet |
+| 📊 **Live Dashboard** | PWA served by the same Worker |
+| 🔍 **Inline Search** | Search saved tweets from any chat |
 | ⌨️ **Keyboard Menu** | Quick buttons for easy use |
-| 🌐 **PWA Support** | Installable web app |
-| ⚡ **Parallel Fetching** | Feed checks are throttled for reliability |
-| 🧠 **Smart Caching** | Translation cache (500 entries) |
-| 🛡️ **Auto Recovery** | DB reconnect + API fallback |
+| ⏰ **Cron Polling** | Checks accounts every 5 minutes, round-robin |
+| 🧠 **Smart Caching** | In-memory translation cache |
+| 🛡️ **Budget Guard** | Stays under Cloudflare's free subrequest limit |
 | 📱 **Mobile Friendly** | Responsive dark UI |
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Create Telegram Bot
+### 1. Create the Telegram bot
 
 1. Open [@BotFather](https://t.me/BotFather) in Telegram
 2. Send `/newbot` and choose a name & username
@@ -50,34 +48,60 @@
 ### 2. Install
 
 ```bash
-git clone https://github.com/Misagh95/twitter-telegram-bot.git
-cd twitter-telegram-bot
-pip install -r requirements.txt
+git clone https://github.com/nikporam/xrelaya.git
+cd xrelaya
+npm install
+npx wrangler login
 ```
 
-### 3. Configure
+Requires **Node.js 20+** and a free Cloudflare account.
 
-Create a `.env` file:
-
-```env
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
-
-# AI Translation (optional)
-TRANSLATE_FA=true
-# You can use REQUESTY_API_KEY or GEMINI_API_KEY
-REQUESTY_API_KEY=your_gemini_api_key
-REQUESTY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-REQUESTY_MODEL=gemini-2.0-flash
-```
-
-### 4. Run
+### 3. Create the D1 database
 
 ```bash
-python twitter_telegram_bot.py
+npx wrangler d1 create xrelaya-db
 ```
 
-Open `http://localhost:8080` for the live dashboard.
+Paste the printed `database_id` into `wrangler.toml`:
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "xrelaya-db"
+database_id = "your-real-database-id"
+```
+
+Then create the tables:
+
+```bash
+npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
+```
+
+### 4. Set the secrets
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN        # required
+npx wrangler secret put SETUP_KEY                 # required, protects /setup
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET   # optional, recommended
+npx wrangler secret put GEMINI_API_KEY            # optional, better translation
+```
+
+### 5. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+Open this once to register the Telegram webhook and the command menu:
+
+```
+https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
+```
+
+It returns JSON showing whether `database`, `getMe`, `setMyCommands` and `setWebhook` succeeded.
+The dashboard is served at `/` on the same domain, and `/health` reports the overall status.
+
+Then send `/start` to your bot in Telegram.
 
 ---
 
@@ -120,107 +144,53 @@ Searches saved tweets and shares them inline.
 
 ---
 
-## ⚡ Deploy to Cloudflare Workers (free, no server)
-
-The whole bot also runs on Cloudflare's free plan — no VPS, no long polling, no Postgres.
-Files: `worker.js` + `lib/` (RSS/filter, translation, D1, Telegram) + `dashboard.html`.
-
-| Python version (Railway/VPS) | Cloudflare version |
-|---|---|
-| `python-telegram-bot` long polling | Telegram **webhook** (`POST /telegram`) |
-| `job_queue` every 5 minutes | **Cron Trigger** |
-| PostgreSQL + `psycopg2` | **Cloudflare D1** (SQLite) |
-| FastAPI + Jinja | the Worker itself + `dashboard.html` |
+## 🧪 Local Development
 
 ```bash
-npm install
-
-# 1) Create the D1 database — put the printed database_id into wrangler.toml
-npx wrangler d1 create xrelaya-db
-
-# 2) Create the tables
-npx wrangler d1 execute xrelaya-db --remote --file=./schema.sql
-
-# 3) Secrets
-npx wrangler secret put TELEGRAM_BOT_TOKEN      # from @BotFather
-npx wrangler secret put SETUP_KEY               # protects /setup
-npx wrangler secret put TELEGRAM_WEBHOOK_SECRET # optional, recommended
-npx wrangler secret put GEMINI_API_KEY          # optional, better translation
-
-# 4) Deploy
-npx wrangler deploy
+cp dev.vars.example .dev.vars   # fill in the token and keys
+npx wrangler dev                # http://localhost:8787
 ```
 
-Then open this once to register the webhook and the bot menu:
+Logic tests (no Cloudflare account needed):
 
+```bash
+npm test
 ```
-https://xrelaya-bot.<your-subdomain>.workers.dev/setup?key=<SETUP_KEY>
-```
-
-It returns JSON showing whether `database`, `getMe`, `setMyCommands` and `setWebhook` succeeded.
-The dashboard is served at `/` on the same domain.
-
-**Cloudflare notes**
-
-- The cron runs every 5 minutes and checks `ACCOUNTS_PER_CRON` accounts per run, round-robin, so any number of tracked accounts keeps working.
-- The free plan allows 50 outbound `fetch()` calls per invocation. The bot budgets itself (`SUBREQUEST_BUDGET`, default 42) and postpones the rest to the next run — no tweet is lost and nothing is sent twice.
-- **Free translation without an API key:** uncomment the `[ai]` block in `wrangler.toml` and the bot uses Workers AI (`@cf/meta/m2m100-1.2b`); otherwise it falls back to Google/MyMemory.
-- Change Nitter mirrors without redeploying: set `RSS_MIRRORS` (comma separated, `{username}` placeholder).
-- Local run: `cp dev.vars.example .dev.vars` then `npx wrangler dev`. Tests: `npm test`.
 
 ---
 
-## 🌐 Deploy to Railway
+## 🏗️ How it works
 
-1. Push to GitHub
-2. Go to [railway.app](https://railway.app)
-3. **New Project** → **Deploy from GitHub Repo**
-4. Select your repo
-5. Add **PostgreSQL** database
-6. Set environment variables:
-
-| Variable | Value |
-|----------|-------|
-| `TELEGRAM_BOT_TOKEN` | Your bot token |
-| `DATABASE_URL` | Auto-set by Railway |
-| `REQUESTY_API_KEY` | Your Gemini key |
-| `REQUESTY_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| `REQUESTY_MODEL` | `gemini-2.0-flash` |
-| `TRANSLATE_FA` | `true` |
-
-7. Deploy! 🎉
+| Concern | Implementation |
+|---------|----------------|
+| Telegram updates | Webhook → `POST /telegram` |
+| Polling schedule | Cloudflare Cron Trigger (`*/5 * * * *`) |
+| Storage | Cloudflare D1 (SQLite) |
+| Dashboard | `dashboard.html` served by the Worker |
+| Translations | AI provider → Workers AI → Google → MyMemory |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-twitter-telegram-bot/
-├── twitter_telegram_bot.py   # Main bot + web server (Python version)
-├── database.py               # PostgreSQL manager (Python version)
-├── templates/
-│   └── index.html            # Dashboard UI (PWA, Python version)
-├── sw.js                     # Service Worker
-├── manifest.json             # PWA manifest
-├── requirements.txt          # Dependencies
-├── Procfile                  # Railway config
-├── README_FA.md              # 🇮🇷 Persian docs
-├── README.md                 # 🇬🇧 English docs
-│
-├── worker.js                 # ⚡ Full bot for Cloudflare Workers
-├── dashboard.html            # Cloudflare dashboard
+xrelaya/
+├── worker.js                 # ⚡ Bot: webhook, cron engine, dashboard, /setup
+├── dashboard.html            # Dashboard UI (PWA)
 ├── lib/
 │   ├── rss.js                #   feed parser + retweet filter
 │   ├── text.js               #   message cards / text helpers
-│   ├── translate.js          #   AI / Google / MyMemory / Workers AI
+│   ├── translate.js          #   AI / Workers AI / Google / MyMemory
 │   ├── db.js                 #   Cloudflare D1 layer
 │   ├── telegram.js           #   Bot API client
 │   └── budget.js             #   subrequest budget guard
 ├── schema.sql                # D1 tables
 ├── wrangler.toml             # Cloudflare config
 ├── package.json              # deploy/test scripts
+├── dev.vars.example          # local dev variables
 ├── test/worker_logic.test.mjs
-└── dev.vars.example          # local dev variables
+├── README_FA.md              # 🇮🇷 Persian docs
+└── README.md                 # 🇬🇧 English docs
 ```
 
 ---
@@ -229,52 +199,39 @@ twitter-telegram-bot/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHECK_INTERVAL` | `300` | Check interval (seconds) |
+| `CHECK_INTERVAL` | `300` | Displayed in `/status`; the real schedule is in `wrangler.toml` `[triggers]` |
+| `ACCOUNTS_PER_CRON` | `5` | Accounts checked per cron run (round-robin) |
+| `MAX_TWEETS_PER_CHECK` | `3` | New tweets processed per account per run |
+| `SUBREQUEST_BUDGET` | `42` | Outbound calls per run; keep below the free-plan limit of 50 |
+| `WEBHOOK_BUDGET` | `20` | Outbound calls per Telegram update |
+| `RSS_MIRRORS` | empty | Comma-separated Nitter mirrors with a `{username}` placeholder |
+| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | Mirrors per account and parallel requests |
 | `TRANSLATE_FA` | `true` | Enable Persian translation |
-| `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | empty | AI provider key for higher quality translation |
-| `DASHBOARD_URL` | `http://localhost:8080` | Dashboard URL |
-| `CONCURRENT_LIMIT` | `3` | Parallel feed fetch limit |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` / `REQUESTY_API_KEY` | empty | AI provider key for higher quality translation |
 | `TRANSLATION_TIMEOUT` | `20` | Timeout per translation attempt (seconds) |
-| `TRANSLATION_RETRIES` | `2` | Retries for the primary AI/Google translation attempts |
-| `TRANSLATION_CONCURRENT_LIMIT` | `1` | Parallel translation calls (keep low to avoid Google rate limits) |
-| `TRANSLATION_BACKFILL_LIMIT` | `15` | Saved untranslated tweets repaired per backfill run |
-| `MAX_TWEETS_PER_CHECK` | `10` | New tweets processed per account each check |
-| `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback translator |
+| `TRANSLATION_RETRIES` | `2` | Attempts per translation provider |
+| `TRANSLATION_BACKFILL_LIMIT` | `5` | Saved untranslated tweets repaired per run |
+| `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
-| `LOG_LEVEL` | `INFO` | Set to `DEBUG` to log why each feed entry was kept or skipped |
-| `ACCOUNTS_PER_CRON` | `5` | (Cloudflare) accounts checked per cron run |
-| `MAX_TWEETS_PER_CHECK` | `3` | (Cloudflare) new tweets processed per account per run |
-| `SUBREQUEST_BUDGET` | `42` | (Cloudflare) outbound calls per run; keep below the free-plan limit of 50 |
-| `RSS_MIRRORS` | empty | (Cloudflare) comma-separated Nitter mirrors with a `{username}` placeholder |
-| `FEED_MIRRORS` / `FEED_BATCH` | `6` / `3` | (Cloudflare) mirrors per account and parallel requests |
-| `SETUP_KEY` | empty | (Cloudflare) protects the `/setup` endpoint |
-| `TELEGRAM_WEBHOOK_SECRET` | empty | (Cloudflare) validates Telegram's webhook header |
+| `SETUP_KEY` | empty | Protects the `/setup` endpoint |
+| `TELEGRAM_WEBHOOK_SECRET` | empty | Validates Telegram's webhook header |
+| `DASHBOARD_URL` | Worker origin | Dashboard URL used by the “🌐 داشبورد” button |
+
+Non-secret values live in the `[vars]` block of `wrangler.toml`; secrets go through `wrangler secret put`.
+Uncommenting the `[ai]` block enables free **Workers AI** translation (no API key needed).
 
 ---
 
 ## 📝 Notes
 
 - ❌ Private accounts won't work (RSS limitation)
-- ✅ Multiple Nitter instances for reliability
-- ✅ Bot auto-switches if one instance is down
-- ✅ Retweets/reposts are filtered out; a display name (e.g. `RippleX`) is never mistaken for a handle, so accounts stay visible
-- ✅ With `LOG_LEVEL=DEBUG` every skipped entry is logged with its reason (e.g. `Skip @nasa 123: status link is @nasa`)
-- ✅ Single Telegram card per tweet: long captions are auto-truncated without splitting into separate messages
-- ✅ Translation retries + Google/MyMemory fallback when the AI provider fails
-- ✅ Saved tweets with empty translations are backfilled automatically for database & dashboard (no duplicate Telegram messages)
-- ✅ Deduplication prevents duplicate messages
-- ✅ Old data auto-cleaned (30 days)
-
----
-
-## 🛠️ Tech Stack
-
-- **Backend:** Python 3.10+, python-telegram-bot v22
-- **Web:** FastAPI + Jinja2 + Tailwind CSS
-- **Database:** PostgreSQL (psycopg2)
-- **AI:** Google Gemini API
-- **RSS:** feedparser + httpx
-- **PWA:** Service Worker + Manifest
+- ✅ Multiple Nitter instances are raced in parallel; the first usable feed wins
+- ✅ Retweets/reposts are filtered out; a display name (e.g. `RippleX`) is never mistaken for a handle
+- ✅ One Telegram card per tweet: long captions are auto-truncated, never split
+- ✅ Translation falls back through Workers AI → Google → MyMemory, and empty results are never cached
+- ✅ Saved tweets with empty translations are backfilled for the dashboard (no duplicate Telegram messages)
+- ✅ Tweet media is downloaded locally before upload, so Telegram never has to reach `pbs.twimg.com`
+- ✅ Old data is cleaned daily (30 days of `sent_ids`, newest 300 tweets kept)
 
 ---
 
